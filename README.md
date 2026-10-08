@@ -1,13 +1,13 @@
 # dsh-plugin-mcp-manager
 
-> MCP server manager and call inspector for **DeepSeek Harness (DSH)**.
-> DeepSeek Harness 的 **MCP 管理器**：把当前 profile 里的每一条 MCP 服务器行集中到一个页面里，看状态、改配置、盯调用。
+> MCP server control panel for **DeepSeek Harness (DSH)**.
+> DeepSeek Harness 的 **MCP 管理器**：把当前 profile 里的每一条 MCP 服务器行集中到一个页面，看状态、启停、取配置。
 
 ---
 
 ## 为什么需要它
 
-DSH 里"MCP 服务器"并不是一个独立的配置对象，而是 **profile 里的一条插件行**：
+DSH 里"MCP 服务器"不是一个独立配置对象，而是 **profile 里的一条插件行**：
 
 ```yaml
 - id: my-server
@@ -19,85 +19,98 @@ DSH 里"MCP 服务器"并不是一个独立的配置对象，而是 **profile �
     args: ['server.py', 'mcp']
 ```
 
-于是它天然缺三样东西：
+DSH 44.0.0 没有"MCP 管理器"页面（`dsh-client-ui-*` 的 48 个包里没有任何 MCP 面板）。
+本插件补上这个视图。
 
-| 缺什么 | 现状 |
-| --- | --- |
-| **集中视图** | 想知道"现在挂了几个 MCP、各自什么状态"，只能逐个组合包翻 patch |
-| **参数编辑** | 配置写死在 `cordis.patch.yml` 里，改一次要动文件 + 重启 |
-| **调用可见** | 只能靠对话里的通用工具卡片，看不出检索词/耗时/结果规模这类细节 |
+## 能做什么 / 不能做什么
 
-本插件把这三件事补上：**一个页面，列出所有 MCP 行，可编辑、可观察**。
+| | 能力 | 说明 |
+| --- | --- | --- |
+| ✅ | **总览** | 列出当前 profile 里所有 `@deepseek-ai/dsh-mcp-client` 行：`serverName`、传输方式、连接目标（命令+参数 / URL）、启用状态、所属组合包、行 id |
+| ✅ | **启停** | 逐行启用/停用（写 profile patch 的 `disabled` 覆盖，走 DSH 官方的 `pluginManager` 服务） |
+| ✅ | **看原始数据** | 展开任意一行，直接看它真实的 entry 对象（不猜字段、不美化） |
+| ✅ | **取 patch 片段** | 一键复制该行的 YAML 片段，粘进 profile 的 `cordis.patch.yml` 即可改参数 |
+| ❌ | **在 UI 里直接改参数** | 见下节：这是 DSH 44.0.0 的架构边界，不是本插件没做 |
+| ⏳ | **调用记录** | 规划中（需要确认会话侧的读取通道） |
 
-## 功能
+## 为什么不能在 UI 里改 MCP 参数（DSH 44.0.0 的架构边界）
 
-- **总览**：列出当前 profile 中所有 `@deepseek-ai/dsh-mcp-client` 行 —— 所属组合包、行 id、`serverName`、传输方式（stdio / streamable-http）、命令或 URL、启用状态、工具数量。
-- **编辑**：在页面上直接改 `command` / `args` / `env` / `cwd` / `url` / `headers` / 超时 / 重连参数，保存后写回 profile patch 并由 Loader 应用（配置编辑走 DSH 的配置编辑服务，不是本插件自己写文件）。
-- **调用记录**：按会话列出 `mcp__<serverName>__*` 工具的调用 —— 工具名、参数摘要、耗时、结果字节数、是否报错。
+三条互相独立的限制，任一条都足以挡住"第三方插件从界面写 MCP 行配置"：
 
-> 状态：**开发中**。见下方 [Roadmap](#roadmap)。装之前请先读 [兼容性](#兼容性)。
+1. **MCP 行的 Config 字段不是 volatile。**
+   `@deepseek-ai/dsh-mcp-client` 的 schema 里 `volatile` 出现 **0 次**；
+   而 `@deepseek-ai/dsh-settings` 的规则是"表单只展示活动且可唯一定位的 profile 条目中的
+   **volatile 字段**；**普通配置仍通过 Cordis 配置文件编辑**"。
+   ⇒ 官方设置表单本身就不会把 MCP 参数渲染成可编辑控件。
+
+2. **客户端可用的 Remote 能力集在构建时固定。**
+   `@deepseek-ai/dsh-api-remotes` 明确写着"能力集合由构建时显式导入的值固定确定；
+   Client 不会在运行时发现 Host 中已启用的服务或 Remote 定义"。
+   应用实际挂载给浏览器侧的只有 `pluginManager`、`pluginInventory`、`settings`、
+   `credentials`、`pluginRegistryProbe` —— **没有 `configEditor`**（写 profile patch 的宿主服务）。
+   ⇒ 第三方插件既不能新增 Remote，也没有现成的写入通道。
+
+3. **配置页 slot 只服务于"自己声明的行"。**
+   插件页的 `plugins.row.config` 以 `<包名>#<行 id>` 为键，且要求
+   "**组合包的 patch 必须以该 id 声明这一行**"。
+   ⇒ 一个第三方组合包无法为别的组合包（例如 `dsh-plugin-kb`）的行注册配置页。
+
+### 三条出路（按推荐顺序）
+
+- **A. 上游改一行**：请 DSH 把 `dsh-mcp-client` 的 Config 字段标为 `volatile()`。
+  一旦如此，**官方设置页会自动**为每条 MCP 行渲染出可编辑表单，本插件只需链接过去。
+  这是代价最小、收益最大的做法。
+- **B. 本插件改成"自己声明 MCP 行"的形态**：让管理器自己 patch 里声明这些行，
+  于是 `plugins.row.config` 对它生效，配置页与 `form.mutate()` 就能用了。
+  代价：MCP 服务器的声明位置从"各组合包"搬到"管理器"，用户要接受这个约定。
+- **C. 宿主半侧提供 agent 工具**：用 `ctx.configEditor` 做写入，暴露成 `mcp_config_set` 之类的工具，
+  由模型代劳；界面仍然只读。适合"能改就行、不挑入口"的场景。
 
 ## 安装
 
-DSH 侧边栏 **设置 → 插件 → 添加插件**，填入下列任一种 spec：
+DSH 侧边栏 **设置 → 插件 → 添加插件**，填：
 
 ```text
 # 本地目录（开发时）
 link:/absolute/path/to/dsh-plugin-mcp-manager
 
-# GitHub（公开仓库）
+# GitHub
 https://github.com/hd25071/dsh-plugin-mcp-manager
-
-# npm（若已发布）
-dsh-plugin-mcp-manager
 ```
 
-安装后它会作为一条组合包出现在插件页的**已安装**分组里，卡片上就是管理器界面。
+安装后它作为一条组合包出现在插件页的**已安装**分组，卡片上就是管理器界面。
 
-> 手工等价操作（没有 `dsh` CLI 时）：在 profile 目录用 DSH 自带 pnpm `add` 该 spec，再把包名追加到 profile `package.json` 的 `dsh.profile.bundles`。
+> 带 JS 的插件是"选择加入"的模块根：**必须完全退出 DSH（含托盘）再启动**才生效。
 
 ## 它是怎么挂上去的
 
 ```text
 package.json
   dsh.bundle.patch  → cordis.patch.yml   插入一行 Host 插件（id: mcp-manager）
-  dsh.client        → client.js          浏览器半侧，注册进插件页的配置 slot
+  dsh.client        → client.js          浏览器半侧，注册进插件页的 plugins.bundle.config slot
 ```
 
-- **Host 半侧**（`index.js`）：读取当前 profile 的 MCP 行与它们的配置、订阅工具调用事件。
-- **浏览器半侧**（`client.js`）：用 `window.__ModuleLoader__.load({ id, factory })` 注册，向插件页的 `plugins.bundle.config` slot 提供本组合包的配置视图。
+- **Host 半侧**（`index.js`）：本插件不需要宿主状态，它是空的 —— 存在的意义是让组合包占一条 Loader 行，
+  客户端模块系统据此把浏览器半侧送进页面。
+- **浏览器半侧**（`client.js`）：`window.__ModuleLoader__.load({ id, factory })` 注册，
+  用 `ctx.remote.pluginManager` 读清单、启停行 —— 与官方插件页**同一套**通道。
 
-两半侧都不 import DSH 的客户端组件库，样式只依赖宿主主题变量（`--dsw-alias-*`），因此在 DSH 升级后不容易碎。
+不 import 任何 Harness Client 包，样式只依赖宿主主题变量（`--dsw-alias-*`），
+因此 DSH 升级时最坏是外观退化，不会把页面弄崩。
 
 ## 兼容性
 
 | 项 | 值 |
 | --- | --- |
 | DSH | 44.0.0（Electron）/ 运行时 0.2.0-rc.2 |
-| peer | `@deepseek-ai/dsh-mcp-client`、`@deepseek-ai/dsh-plugin-manager`、`@deepseek-ai/dsh-config-editor`（均由 DSH 自身提供） |
+| 依赖的宿主能力 | `remote.pluginManager`（`listBundles` / `listPlugins` / `setPluginEnabled`） |
 | 平台 | Web UI（Desktop 与服务器版 DSH 共用同一套客户端） |
 
-DSH 的插件 API 仍在演进。本插件只使用**文档化的 slot 与宿主服务**；遇到 API 变更时会以"页面显示不可用"而不是崩溃的方式降级。
+## 状态
 
-## Roadmap
-
-- [x] 组合包骨架（Host 行 + 浏览器半侧 + 插件页卡片）
-- [ ] MCP 行总览（列表 + 状态 + 工具数）
-- [ ] 配置编辑（表单 + 保存 + 恢复默认 + 连通性自测）
-- [ ] 调用记录（工具名 / 参数摘要 / 耗时 / 结果规模 / 错误）
-- [ ] 一键启停单条 MCP 行
-- [ ] 导出/导入 MCP 配置片段（便于换机）
-
-## 开发
-
-无构建步骤：直接改 `index.js` / `client.js`，因为是 `link:` 安装，改完**完全退出 DSH（含托盘）再启动**即可生效。
-
-验证要点：
-
-1. 插件页里出现本组合包卡片，且卡片上的管理器界面能渲染；
-2. 总览里能看到 profile 中真实存在的 MCP 行；
-3. 改一个字段保存后，profile 的 `cordis.patch.yml` 里对应行出现覆盖项；
-4. 调用一次 MCP 工具后，调用记录里出现该次调用。
+**未在运行中的 DSH 里验证过**（v0.1 骨架 + 界面代码已提交，但尚未安装运行）。
+已知的不确定点：`listBundles()` / `listPlugins()` 返回对象的**字段名**在不同版本间可能不同，
+因此界面按"多字段名兼容 + 原始 JSON 兜底"来写，保证显示真实数据而不是猜。
 
 ## 许可
 
