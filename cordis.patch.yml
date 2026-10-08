@@ -1,0 +1,5 @@
+# dsh-plugin-mcp-manager — one Host row; the browser half renders the manager page.
+
+- insert:
+    - id: mcp-manager
+      name: 'dsh-plugin-mcp-manager'
