@@ -114,13 +114,49 @@ function disabledOfEntry(entry) {
 }
 
 /**
+ * Collect MCP rows from the plugin manager, keyed by every id a later join may use.
+ *
+ * A row's owning bundle and its `rowId` are what a per-row config page needs
+ * (`plugins.row.config` is keyed `<bundle>#<rowId>`), so they are carried alongside
+ * the config editor's composed values.
+ *
+ * @param manager - the plugin manager service.
+ * @returns a map from entry id / row id to the row's origin.
+ */
+function managerRows(manager) {
+  const byId = new Map();
+  if (manager === undefined || typeof manager.listBundles !== 'function') return byId;
+  const bundles = manager.listBundles();
+  for (const bundle of Array.isArray(bundles) ? bundles : []) {
+    const bundleName = (bundle && (bundle.name || bundle.package || bundle.pkg)) || '';
+    const rows = bundle && Array.isArray(bundle.rows) ? bundle.rows : [];
+    for (const row of rows) {
+      const module = (row && (row.moduleName || row.module)) || '';
+      if (module !== MCP_MODULE) continue;
+      const rowId = (row && (row.rowId || row.entryId || row.id)) || '';
+      const entryId = (row && (row.entryId || row.rowId || row.id)) || '';
+      const origin = {
+        bundle: bundleName,
+        rowId,
+        entryId,
+        module: MCP_MODULE,
+        enabled: row && typeof row.enabled === 'boolean' ? row.enabled : undefined,
+      };
+      if (entryId) byId.set(entryId, origin);
+      if (rowId && !byId.has(rowId)) byId.set(rowId, origin);
+    }
+  }
+  return byId;
+}
+
+/**
  * Answer the inventory route.
  *
  * `configEditor.configuration()` is the primary source because it carries the
  * *composed* config (inherited layer plus this profile's override) alongside the
- * Loader entry that a later write needs. When that service is absent the route
- * falls back to the plugin manager's listings, which still identify MCP rows even
- * though they carry no config.
+ * Loader entry a later write needs. `pluginManager.listBundles()` is joined in for
+ * the owning bundle and `rowId`; when the config editor is absent the listings still
+ * identify MCP rows, only read-only.
  *
  * @param ctx - the plugin context.
  * @returns the inventory envelope.
@@ -130,6 +166,14 @@ function serversResponse(ctx) {
   const manager = serviceOf(ctx, 'pluginManager');
   const rows = [];
   let source = '';
+  let origin = new Map();
+  let managerError = '';
+
+  try {
+    origin = managerRows(manager);
+  } catch (error) {
+    managerError = String((error && error.message) || error);
+  }
 
   if (editor !== undefined && typeof editor.configuration === 'function') {
     let configuration;
@@ -142,10 +186,14 @@ function serversResponse(ctx) {
     for (const item of Array.isArray(configuration) ? configuration : []) {
       const entry = item && item.entry;
       if (moduleOfEntry(entry) !== MCP_MODULE) continue;
+      const id = idOfEntry(entry);
+      const meta = origin.get(id) || {};
       const inherited = (item && item.inherited) || {};
       const override = (item && item.override) || {};
       rows.push({
-        id: idOfEntry(entry),
+        id,
+        rowId: meta.rowId || id,
+        bundle: meta.bundle || '',
         module: MCP_MODULE,
         disabled: disabledOfEntry(entry),
         inherited,
@@ -154,33 +202,24 @@ function serversResponse(ctx) {
         editable: true,
       });
     }
-  } else if (manager !== undefined && typeof manager.listBundles === 'function') {
+  } else if (origin.size > 0) {
     source = 'pluginManager';
-    let bundles;
-    try {
-      bundles = manager.listBundles();
-    } catch (error) {
-      return failure('plugin-manager-failed', String((error && error.message) || error), 500);
+    for (const [id, meta] of origin) {
+      if (id !== meta.entryId) continue;
+      rows.push({
+        id,
+        rowId: meta.rowId,
+        bundle: meta.bundle,
+        module: MCP_MODULE,
+        disabled: typeof meta.enabled === 'boolean' ? !meta.enabled : undefined,
+        inherited: {},
+        override: {},
+        effective: {},
+        editable: false,
+      });
     }
-    const list = Array.isArray(bundles) ? bundles : [];
-    for (const bundle of list) {
-      const bundleName = (bundle && (bundle.name || bundle.package)) || '';
-      const bundleRows = (bundle && bundle.rows) || [];
-      for (const row of Array.isArray(bundleRows) ? bundleRows : []) {
-        const module = (row && (row.moduleName || row.module)) || '';
-        if (module !== MCP_MODULE) continue;
-        rows.push({
-          id: (row && (row.entryId || row.rowId)) || '',
-          module: MCP_MODULE,
-          disabled: row && typeof row.disabled === 'boolean' ? row.disabled : undefined,
-          inherited: {},
-          override: {},
-          effective: (row && row.config) || {},
-          bundle: bundleName,
-          editable: false,
-        });
-      }
-    }
+  } else if (managerError !== '') {
+    return failure('plugin-manager-failed', managerError, 500);
   } else {
     return failure('service-unavailable',
       'neither configEditor nor pluginManager is mounted in this profile', 503);
@@ -196,6 +235,7 @@ function serversResponse(ctx) {
         read: source === 'configEditor',
         write: editor !== undefined && typeof editor.edit === 'function',
         toggle: manager !== undefined && typeof manager.setPluginEnabled === 'function',
+        rowPages: rows.every((row) => row.bundle !== '' && row.rowId !== ''),
       },
     },
   });

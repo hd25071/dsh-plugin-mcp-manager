@@ -66,6 +66,24 @@ package.json
 3. **配置编辑的 `change` 是函数**：`configEditor.edit(entry, (current, inherited) => next)`。
    当 `next` 与 `inherited` 深相等时，编辑器会**删掉** profile 覆盖项 —— 这正是"恢复默认"的语义。
 
+### 已核对的实现事实（DSH 44.0.0）
+
+写这个插件时逐条核对过的平台事实，附出处（包 / 文件 / 行号），省得下一个人再挖一遍：
+
+| 事实 | 出处 |
+| --- | --- |
+| `dsh.client` 的权威校验：`platform` 必填字符串，`inject`/`external` 必须字符串数组，`immediately` 必须布尔，**未知键被静默丢弃** | `dsh-client-modules/lib/client.js:61-75` |
+| client.js 的 `id` **必须等于包名**；写错的症状是 `loaded without registering "<行id>"`，而且**注册时不报错、到到达阶段才失败** | 同上 `:569-576`、`:625`、`:739` |
+| 客户端半侧**不需要**在 patch 里单独加 row：它挂在"说明符等于包名"的那一行上（所以行 id 可以≠包名） | 官方第三方样板 `cordis.patch.yml` 的注释 |
+| `factory(require)` 只能拿到种子表（`react` / `react-dom` / `react/jsx-runtime` / `cordis` / `ui-slots` / `ui-primitives`）或已注册的 factory | 同上 |
+| `configEditor` 只有 `documentPath`(getter) / `entries()` / `configuration()` / `edit(entry, change)`，**没有 read/get** | `dsh-config-editor/lib/index.js:24-135` |
+| `edit` 的 `change` 是函数 `(current, inherited) => next`；`next` 与 `inherited` 深相等时编辑器**删除**覆盖项 | 同上 `:69-110` |
+| `plugins.row.config` 的 key 是 `<组合包名>#<行id>`，且**可以为别的组合包的行注册**（账本只比对 key 集合）——所以能给原本没有配置页的 MCP 行"凭空造出行页" | `dsh-client-ui-plugin-manager/lib/client.js:48`、`:3356-3357` |
+| `form.mutate(ops, expectedRevision)` 返回 `Promise<boolean>`；ops 词表是 `[{op:'set',path,value},{op:'unset',path}]`（**不是** `plugin-manager/lib/types/operations.js` 里那套 pnpm 操作） | `dsh-client-ui-settings/lib/client.js:1177-1194` |
+| MCP 行的判据是 `listBundles().rows[].moduleName === '@deepseek-ai/dsh-mcp-client'`，元素形如 `{rowId, moduleName, entryId?, meta?}`；启停用 `setPluginEnabled(entryId, enabled)` | `dsh-plugin-manager` 的清单类型 |
+| 工具事件载荷里**没有耗时**；要耗时得用持久会话事件的 `time`：`result.time − call.time` | `dsh-session-stats/lib/types/projection.js:123-135` |
+| 会话投影的 schema **必须是 Zod**（schemastery 无 `.parse()`，纯 JSON Schema 也不行）；`link:` 安装的包解析不到 `zod`，需自己 vendor 到插件目录的 `node_modules` | 本机另一插件的 vendor 先例 |
+
 ## 安装
 
 DSH 侧边栏 **设置 → 插件 → 添加插件**，填：
@@ -90,6 +108,17 @@ https://github.com/hd25071/dsh-plugin-mcp-manager
 | 依赖的宿主服务 | `connection`（路由）、`configEditor`（读/写配置）、`pluginManager`（启停） |
 | 平台 | Web UI（Desktop 与服务器版 DSH 共用同一套客户端） |
 | 无构建步骤 | 纯 JS，改完重启 DSH 即生效 |
+
+## Roadmap
+
+- [x] 组合包骨架（Host 行 + 浏览器半侧 + 插件页卡片）
+- [x] MCP 行总览（清单 + 生效值 + 覆盖标记）
+- [x] 配置编辑（保存 / 恢复默认）+ 启停
+- [x] 诊断路由（本 profile 挂了哪些服务）
+- [ ] **每条 MCP 行自己的配置页**：注册 `plugins.row.config`（key = `<bundle>#<rowId>`），
+      让配置控件出现在该行自己的页面上，而不是只在本组合包的卡片里 —— 需要先在一个跑着的 DSH 上验证动态 key 集的注册时机
+- [ ] **调用记录**：宿主路由 + `sessionQuery.readSession(sessionId)`，按 `tool/call` / `tool/result`
+      配对算出耗时与结果规模 —— 待定的只是"插件页里看哪个会话"的交互（会话选择器 / 对话内工具卡片 / 侧栏页）
 
 ## 状态与验证
 

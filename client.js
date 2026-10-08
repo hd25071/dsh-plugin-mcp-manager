@@ -180,8 +180,8 @@ window.__ModuleLoader__.load({
             ? h('span', { style: S.tag }, '已覆盖 ' + overriddenKeys.length + ' 项') : null,
         ),
         h('div', { style: { ...S.mono, ...S.muted, marginTop: 4 } },
-          row.id ? 'id: ' + row.id : '',
-          targetOf(row.effective) ? '  →  ' + targetOf(row.effective) : ''),
+          row.bundle ? row.bundle + '#' + row.rowId + '   ' : (row.id ? 'id: ' + row.id + '   ' : ''),
+          targetOf(row.effective) ? '→  ' + targetOf(row.effective) : ''),
 
         fields.length === 0
           ? h('div', { style: { ...S.muted, marginTop: 8 } }, '这一行没有可读到的配置（只读来源）。')
@@ -289,6 +289,7 @@ window.__ModuleLoader__.load({
           '带 * 的字段表示这一行已在 profile 里覆盖过。',
           '「恢复默认」会移除覆盖项、回到组合包声明的值。',
           caps.write === false ? '（注意：本 profile 未挂载 configEditor，只能读。）' : '',
+          caps.rowPages === false ? '（有行缺少所属组合包信息，逐行配置页暂不可用。）' : '',
         ),
       );
     }
