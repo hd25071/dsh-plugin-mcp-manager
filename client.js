@@ -980,8 +980,17 @@ window.__ModuleLoader__.load({
           : null,
         refreshing
           ? h('div', { className: 'mcpm-statusline mcpm-statusline--progress' },
-            '正在后台' + (status.refreshing.mode === 'full' ? '全量重拉' : '增量更新') + '：已 ' + status.refreshing.pages + ' 页 / ' + status.refreshing.rawEntries + ' 条，'
-            + (status.refreshing.mode === 'full' ? '保留 ' + status.refreshing.kept + ' 个服务器' : '变更 ' + status.refreshing.kept + ' 条')
+            // The host reports which mode it is running. A host that predates that field
+            // reports nothing, and naming a mode then would be a lie in the one line the
+            // user reads to decide whether the catalog is complete. Version skew is real:
+            // the browser bundle hot-replaces while the host keeps running the old code.
+            (status.refreshing.mode === 'full' ? '正在后台全量重拉'
+              : status.refreshing.mode === 'incremental' ? '正在后台增量更新'
+                : '正在后台拉取')
+            + '：已 ' + status.refreshing.pages + ' 页 / ' + status.refreshing.rawEntries + ' 条，'
+            + (status.refreshing.mode === 'incremental'
+              ? '变更 ' + status.refreshing.kept + ' 条'
+              : '保留 ' + status.refreshing.kept + ' 个服务器')
             + '。目录尚不完整，装完即用的条目可能还没进来。')
           : null,
         status && status.refreshing && status.refreshing.error
