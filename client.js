@@ -569,6 +569,10 @@ window.__ModuleLoader__.load({
 
 /* The sort control is a native select, out of step with the rounded chips and buttons. */
 .mcpm-select { border-radius: var(--mcpm-radius); padding: 3px 7px; border: .5px solid var(--mcpm-border-strong); background: transparent; color: inherit; }
+/* The popup is drawn by the platform with its own light surface, while the options inherit
+   this page's text colour — near-white under the dark theme, so the list was unreadable.
+   Each option carries its own pair instead. */
+.mcpm-select option { color: var(--dsw-alias-label-primary, #0f1115); background: var(--dsw-alias-bg-layer-1, #ffffff); }
 
 /* On a narrow screen the Enter key searches fine, so the button is redundant. */
 @media (max-width: 720px) { .mcpm-btn--search { display: none; } }
@@ -579,9 +583,20 @@ window.__ModuleLoader__.load({
   border: .5px solid var(--mcpm-border-strong); background: transparent; color: inherit;
 }
 /* '--primary' marks the card's main action; the state decides how it looks. */
-.mcpm-btn--primary,
-.mcpm-btn[data-state="idle"], .mcpm-btn[data-state="needs-config"] {
+.mcpm-btn--primary {
   background: var(--dsw-alias-button-primary-fill, #0f1115); color: var(--dsw-alias-label-primary-foreground, #ffffff); border: none;
+}
+/* The card action is tonal, like the update state already was: sixty filled pills per page
+   glare under the dark theme, where the primary fill is near-white. It fills in on hover and
+   on keyboard focus, so the emphasis is there when the pointer is. The one filled primary
+   left is the dialog's confirm — the single decision on that surface. */
+.mcpm-btn[data-state="idle"], .mcpm-btn[data-state="needs-config"] {
+  background: transparent; color: var(--dsw-alias-button-primary-fill, #0f1115);
+  border: .5px solid var(--dsw-alias-button-primary-fill, #0f1115);
+}
+.mcpm-btn[data-state="idle"]:hover, .mcpm-btn[data-state="needs-config"]:hover,
+.mcpm-btn[data-state="idle"]:focus-visible, .mcpm-btn[data-state="needs-config"]:focus-visible {
+  background: var(--dsw-alias-button-primary-fill, #0f1115); color: var(--dsw-alias-label-primary-foreground, #ffffff);
 }
 .mcpm-btn[data-state="installed"] {
   background: transparent; color: var(--dsw-alias-state-success-primary, #22c55e); border: 1px solid var(--dsw-alias-state-success-primary, #22c55e);
