@@ -23,6 +23,7 @@
  *
  * @module dsh-plugin-mcp-manager
  */
+import { join } from 'node:path';
 import * as market from './market.js';
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -847,15 +848,21 @@ async function marketInstallResponse(request, ctx) {
   // install already owns, and its manifest decides what actually runs.
   let mcpbInfo = null;
   if (plan.needsDownload === true && plan.registryType === 'mcpb') {
-    const targetDir = join(market.bundleDir(slug), 'mcpb');
-    const fetched = await market.fetchMcpb(plan.identifier, targetDir);
-    if (!fetched.ok) return failure('mcpb-download-failed', fetched.reason, 400);
-    const mapped = market.planFromMcpb(fetched.manifest, fetched.extractedDir, config, ctx);
-    if (!mapped.ok) return failure('mcpb-manifest-rejected', mapped.reason, 400);
-    plan.command = mapped.command;
-    plan.env = mapped.env;
-    args = mapped.args;
-    mcpbInfo = { identifier: plan.identifier, bytes: fetched.bytes, entries: fetched.entries, entryPoint: mapped.entryPoint };
+    // Wrapped because an exception here leaves the route with no body, and the UI then shows a
+    // bare "HTTP 400" — the silent failure this whole round has been about, in a new place.
+    try {
+      const targetDir = join(market.bundleDir(slug), 'mcpb');
+      const fetched = await market.fetchMcpb(plan.identifier, targetDir);
+      if (!fetched.ok) return failure('mcpb-download-failed', fetched.reason, 400);
+      const mapped = market.planFromMcpb(fetched.manifest, fetched.extractedDir, config, ctx);
+      if (!mapped.ok) return failure('mcpb-manifest-rejected', mapped.reason, 400);
+      plan.command = mapped.command;
+      plan.env = mapped.env;
+      args = mapped.args;
+      mcpbInfo = { identifier: plan.identifier, bytes: fetched.bytes, entries: fetched.entries, entryPoint: mapped.entryPoint };
+    } catch (error) {
+      return failure('mcpb-install-crashed', `mcpb 安装过程出错：${String((error && error.message) || error)}`, 500);
+    }
   }
 
   let written;
