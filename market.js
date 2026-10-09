@@ -1120,10 +1120,13 @@ export function pruneAllBundleLinks() {
  * @returns `{ok, via, tries, error}`.
  */
 function removeLink(link) {
+  // Order matters: `unlinkSync` is the one the host actually honours. `rmSync(recursive,
+  // force)` reported success there and removed nothing, and it is kept last because a real
+  // directory (should one ever appear here) is the only thing it handles better.
   const attempts = [
-    () => rmSync(link, { recursive: true, force: true }),
     () => unlinkSync(link),
     () => rmdirSync(link),
+    () => rmSync(link, { recursive: true, force: true }),
   ];
   let error = '';
   for (let index = 0; index < attempts.length; index += 1) {
