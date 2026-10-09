@@ -310,8 +310,9 @@ function score(server, needle) {
  * Search the cached snapshot locally.
  *
  * @param query - free text; empty lists everything.
- * @param options - `{kind, sort, limit, offset}`; `kind` is `all`, `local`, `remote`, or
- * `unsupported`.
+ * @param options - `{kind, sort, limit, offset, decorate}`; `kind` is `all`, `local`,
+ * `remote`, or `unsupported`. `decorate(server)` may add fields to each result — the route
+ * uses it to attach the card state, so a card never needs a second request.
  * @returns `{total, offset, limit, results}`.
  */
 export function searchCatalog(query, options = {}) {
@@ -321,6 +322,7 @@ export function searchCatalog(query, options = {}) {
   const sort = options.sort || 'relevance';
   const limit = Number.isFinite(options.limit) && options.limit > 0 ? Math.min(Math.floor(options.limit), 200) : 30;
   const offset = Number.isFinite(options.offset) && options.offset > 0 ? Math.floor(options.offset) : 0;
+  const decorate = typeof options.decorate === 'function' ? options.decorate : null;
 
   const scored = [];
   for (const server of servers) {
@@ -336,8 +338,43 @@ export function searchCatalog(query, options = {}) {
   else if (sort === 'name') scored.sort((left, right) => left.server.name.localeCompare(right.server.name));
   else scored.sort((left, right) => right.value - left.value || left.server.name.localeCompare(right.server.name));
 
-  const page = scored.slice(offset, offset + limit).map((item) => summarize(item.server));
+  const page = scored.slice(offset, offset + limit).map((item) => {
+    const summary = summarize(item.server);
+    return decorate === null ? summary : { ...summary, ...decorate(item.server, summary) };
+  });
   return { total: scored.length, offset, limit, results: page };
+}
+
+/**
+ * The card state machine's inputs for one server.
+ *
+ * Computed on the host so the card flow needs no per-card request: whether this machine
+ * can install it at all (and why not), whether it needs secrets before it can run, and
+ * whether it is already installed (plus whether the registry has moved on).
+ *
+ * @param server - a normalized server.
+ * @param runtimes - the result of {@link detectRuntimes}.
+ * @param installed - installed manifests keyed by registry name.
+ * @returns `{installable, unsupportedReason, planKind, registryType, needsConfig, installedSlug, installedVersion, updateAvailable}`.
+ */
+export function cardStateFor(server, runtimes, installed = new Map()) {
+  const { options, blocked } = plansFor(server, runtimes);
+  const plan = options[0];
+  const manifest = installed.get(server.name) || null;
+  const needsConfig = plan === undefined
+    ? false
+    : (plan.variables || []).some((variable) => variable.isRequired || variable.isSecret)
+      || (plan.slots || []).some((slot) => slot.isRequired);
+  return {
+    installable: plan !== undefined,
+    unsupportedReason: plan === undefined ? ((blocked[0] && blocked[0].reason) || '没有可用的安装方式') : '',
+    planKind: plan === undefined ? '' : plan.kind,
+    registryType: plan === undefined ? '' : plan.registryType,
+    needsConfig,
+    installedSlug: manifest === null ? '' : manifest.slug,
+    installedVersion: manifest === null ? '' : manifest.registryVersion,
+    updateAvailable: manifest !== null && server.version !== '' && server.version !== manifest.registryVersion,
+  };
 }
 
 /** What one server offers, in the terms the UI filters by. */

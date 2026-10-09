@@ -18,6 +18,46 @@ await import('../client.js');
 function steer(value) {
   if (typeof value === 'string' && value === 'rows') return 'market';
   if (typeof value === 'string' && value === '') return 'x/y';
+  // Both the status line and the install dialog start from `null`, so one fixture carries
+  // both shapes: the status fields the header reads and the detail fields the dialog reads.
+  // Reaching both in one pass is what caught a missing helper the preview exposed.
+  if (value === null) {
+    return {
+      fetchedAt: new Date().toISOString(),
+      count: 7287,
+      stale: false,
+      ageMs: 3600000,
+      source: 'cache',
+      refreshing: { running: false, pages: 0, rawEntries: 0, kept: 0, error: '', finishedAt: 0 },
+      runtimes: { platform: 'win32', node: { path: 'C:\\node\\node.exe', available: true, withoutNpm: '' }, npx: { available: true, cli: 'C:\\npm\\npx-cli.js' }, uvx: { available: false }, docker: { available: true } },
+      cachePath: 'C:\\cache.json',
+      installed: 0,
+      server: { name: 'vendor.example/notes', title: 'Vendor Notes', description: 'a local one', version: '1.0.0', packages: [], remotes: [] },
+      options: [{
+        kind: 'stdio', registryType: 'npm', label: '本地进程 · npx @example/notes-mcp', transport: 'stdio',
+        command: 'C:\\node\\node.exe',
+        argv: [{ kind: 'literal', value: 'C:\\npm\\npx-cli.js' }, { kind: 'literal', value: '-y' }, { kind: 'literal', value: '@example/notes-mcp' }, { kind: 'slot', name: '--out', description: '', isRequired: false, format: '' }],
+        slots: [{ name: '--out', description: '', isRequired: false, format: '' }],
+        env: {}, variables: [{ name: 'EXAMPLE_API_KEY', description: 'key', isRequired: true, isSecret: true, default: '' }],
+        risk: '在你本机执行第三方命令',
+      }],
+      blocked: [{ registryType: 'oci', identifier: 'ghcr.io/x', reason: '容器方式（oci）二期支持' }],
+      slug: 'vendor-example-notes-000000',
+      serverName: 'notes',
+    };
+  }
+  // The search result state, so the grid renders real cards in every state.
+  if (value !== null && typeof value === 'object' && Array.isArray(value.results) && value.results.length === 0) {
+    return {
+      total: 3,
+      offset: 0,
+      results: [
+        { name: 'vendor.example/notes', title: 'Vendor Notes', description: 'a local one', version: '1.0.0', types: ['npm'], hasRemote: false, kinds: [], installable: true, needsConfig: false, installedSlug: '', updateAvailable: false },
+        { name: 'vendor.example/keyed', title: 'Vendor Keyed', description: 'needs a key', version: '2.0.0', types: ['npm'], hasRemote: false, kinds: [], installable: true, needsConfig: true, installedSlug: '', updateAvailable: false },
+        { name: 'vendor.example/legacy-sse', title: 'Vendor SSE', description: 'sse only', version: '1.0.0', types: [], hasRemote: true, kinds: ['sse'], installable: false, unsupportedReason: '暂不支持 sse 远程传输（二期）', installedSlug: '', updateAvailable: false },
+      ],
+    };
+  }
   return value;
 }
 
@@ -70,6 +110,7 @@ function renderDeep(element, depth = 0) {
   if (depth > 24) return '';
   if (typeof element === 'string' || typeof element === 'number') return String(element);
   if (element === null || element === undefined || typeof element !== 'object') return '';
+  if (Array.isArray(element)) return element.map((child) => renderDeep(child, depth + 1)).join('');
   let text = '';
   if (typeof element.type === 'function') text += renderDeep(element.type(element.props || {}), depth + 1);
   for (const child of element.children || []) text += renderDeep(child, depth + 1);
@@ -84,23 +125,79 @@ function componentFor(name) {
 
 test('the client module registers under its package name and activates', () => {
   assert.equal(captured.id, 'dsh-plugin-mcp-manager');
-  assert.ok(registered.length >= 3, 'expected the manager page, the dock pane body and the tab title');
+  assert.ok(registered.length >= 4, 'expected the manager page, the dock pane body and title, and the market page');
 });
 
-test('the manager page renders deeply: tabs, rows, market search and the install dialog', () => {
+test('the market registers as its own nav entry above the third-party panels', () => {
+  const entry = registered.find((item) => item.descriptor.name === 'sidebar.panellist');
+  assert.ok(entry, 'the market must register a sidebar.panellist entry');
+  assert.equal(entry.descriptor.id, 'mcp-market');
+  assert.equal(entry.descriptor.order, 5, 'the host Plugins entry is 0 and the third-party panels are 30');
+  assert.equal(typeof entry.descriptor.label, 'function');
+  assert.equal(entry.descriptor.label(), 'MCP 市场');
+
+  const page = registered.find((item) => item.descriptor.name === 'main');
+  assert.ok(page, 'the market must register a main panel');
+  assert.equal(page.descriptor.key, entry.descriptor.id, 'the nav id and the main key must be the same value');
+});
+
+test('the manager page keeps its rows and points at the market instead of embedding it', () => {
   const text = renderDeep(componentFor('plugins.bundle.config')({}));
   assert.match(text, /MCP 管理器/);
-  assert.match(text, /MCP 行/);
   assert.match(text, /调用记录/);
-  assert.match(text, /市场/);
-  // The market tab's own controls.
-  assert.match(text, /刷新目录/);
-  assert.match(text, /可本地安装/);
+  assert.match(text, /MCP 市场/, 'the manager must tell the user where the market lives');
+  assert.doesNotMatch(text, /刷新目录/, 'the market must not be embedded in the manager any more');
+});
+
+test('the market page renders the toolbar, the grid and the pager', () => {
+  const text = renderDeep(componentFor('main')({}));
+  assert.match(text, /全部/);
+  assert.match(text, /本地/);
+  assert.match(text, /远程/);
   assert.match(text, /最新上架/);
-  assert.match(text, /搜索结果/);
-  // The install dialog, reached through the market panel.
-  assert.match(text, /来源：官方 MCP 注册表/);
-  assert.match(text, /取消/);
+  assert.match(text, /刷新目录/);
+  assert.match(text, /搜索结果（3）/);
+  assert.match(text, /上一页/);
+  assert.match(text, /下一页/);
+  assert.match(text, /每页 60/, 'pagination size must be visible');
+  // The three card states the state machine has to express.
+  assert.match(text, /安装 · 需密钥/, 'a card that needs secrets says so before the click');
+  assert.match(text, /不可用/, 'an unsupported entry is visibly unavailable');
+  assert.match(text, /Vendor Notes/);
+});
+
+test('the market markup is class-based: semantic classes and data-state, never inline style', () => {
+  const styles = [];
+  const classes = new Set();
+  const states = new Set();
+  const walk = (element, depth = 0) => {
+    if (depth > 24 || element === null || element === undefined || typeof element !== 'object') return;
+    if (Array.isArray(element)) { for (const child of element) walk(child, depth + 1); return; }
+    const props = element.props || {};
+    if (props.style !== undefined) styles.push(String(element.type));
+    if (typeof props.className === 'string') for (const name of props.className.split(/\s+/)) if (name) classes.add(name);
+    if (props['data-state'] !== undefined) states.add(String(props['data-state']));
+    if (typeof element.type === 'function') walk(element.type(props), depth + 1);
+    for (const child of element.children || []) walk(child, depth + 1);
+  };
+  walk(componentFor('main')({}));
+
+  assert.deepEqual(styles, [], 'the visual spec replaces the class table, so no component may carry an inline style');
+  for (const name of ['mcpm-page', 'mcpm-toolbar', 'mcpm-grid', 'mcpm-card', 'mcpm-btn', 'mcpm-pager']) {
+    assert.equal(classes.has(name), true, 'missing semantic class: ' + name);
+  }
+  assert.equal(states.size > 0, true, 'button states must be expressed through data-state');
+  for (const state of states) {
+    assert.equal(['idle', 'needs-config', 'installed', 'update', 'unavailable', 'busy'].includes(state), true, 'unexpected data-state: ' + state);
+  }
+});
+
+test('the class table defines every state hook the components use', () => {
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8');
+  for (const selector of ['.mcpm-card', '.mcpm-grid', '.mcpm-btn--primary', '.mcpm-badge', '.mcpm-pager', '[data-state=']) {
+    assert.equal(source.includes(selector), true, 'the class table must style ' + selector);
+  }
+  assert.match(source, /const MARKET_CSS = `/, 'the class table must stay one replaceable block');
 });
 
 test('the call-log pane renders its session picker', () => {

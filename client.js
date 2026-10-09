@@ -75,12 +75,13 @@ window.__ModuleLoader__.load({
 
     const marketStatus = () => call(MARKET_ROUTE);
     const marketInstalled = () => call(MARKET_INSTALLED_ROUTE);
-    const marketSearch = (q, kind, sort) => {
+    const marketSearch = (q, kind, sort, offset) => {
       const params = new URLSearchParams();
       if (q) params.set('q', q);
       if (kind && kind !== 'all') params.set('kind', kind);
       if (sort && sort !== 'relevance') params.set('sort', sort);
-      params.set('limit', '30');
+      params.set('limit', String(MARKET_PAGE_SIZE));
+      params.set('offset', String(offset || 0));
       return call(MARKET_SEARCH_ROUTE + '?' + params.toString());
     };
     const marketDetail = (name) => call(MARKET_DETAIL_ROUTE + '?name=' + encodeURIComponent(name));
@@ -400,7 +401,76 @@ window.__ModuleLoader__.load({
       );
     }
 
-    // ------------------------------------------------------------ market: install
+    // --------------------------------------------------------- market (nav page)
+
+    /**
+     * The nav id. `sidebar.panellist` and the `main` panel are addressed by this same
+     * value — the sidebar resolves one from the other.
+     */
+    const MARKET_PANEL_ID = 'mcp-market';
+
+    /**
+     * Nav position. The host's own Plugins entry registers `order: 0` and the third-party
+     * panels in this profile sit at 30, so 5 lands directly under Plugins. Recorded in the
+     * README so a later plugin does not silently take the same slot.
+     */
+    const MARKET_PANEL_ORDER = 5;
+
+    /** Cards per page: the catalog holds thousands, and sorting/filtering stays exact. */
+    const MARKET_PAGE_SIZE = 60;
+
+    /**
+     * The skeleton's entire class table.
+     *
+     * Every visual value lives here and nowhere else. Components carry semantic class names
+     * plus `data-state`, so replacing this block replaces the look without touching a
+     * component. Layout values are present so the skeleton is usable; colours are
+     * deliberately left to DSH theme variables and to the `data-state` hooks below, which
+     * the visual spec fills in.
+     */
+    const MARKET_CSS = `
+.mcpm-page { display: flex; flex-direction: column; gap: 12px; height: 100%; box-sizing: border-box; padding: 16px; overflow-y: auto; }
+.mcpm-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.mcpm-search { flex: 1 1 240px; }
+.mcpm-filters { display: flex; gap: 4px; }
+.mcpm-status { line-height: 1.7; }
+.mcpm-section { display: flex; flex-direction: column; gap: 10px; }
+.mcpm-section-title { font-weight: 600; }
+.mcpm-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+.mcpm-card { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.28)); border-radius: 8px; padding: 12px; }
+.mcpm-card__icon { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.35)); }
+.mcpm-card__name { font-weight: 600; overflow-wrap: anywhere; }
+.mcpm-card__desc { color: var(--dsw-alias-text-secondary, inherit); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.mcpm-card__badges { display: flex; flex-wrap: wrap; gap: 4px; }
+.mcpm-card__actions { margin-top: auto; display: flex; gap: 6px; }
+.mcpm-badge { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.35)); color: var(--dsw-alias-text-secondary, inherit); }
+.mcpm-btn { font: inherit; cursor: pointer; padding: 3px 10px; border-radius: 6px; border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.4)); background: transparent; color: inherit; }
+.mcpm-btn--primary { border-color: var(--dsw-alias-border, rgba(128,128,128,.5)); background: var(--dsw-alias-bg-secondary, rgba(128,128,128,.12)); }
+.mcpm-btn[data-state="unavailable"] { cursor: not-allowed; color: var(--dsw-alias-text-secondary, inherit); }
+.mcpm-chip { font: inherit; cursor: pointer; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.35)); background: transparent; color: inherit; }
+.mcpm-chip[data-active="true"] { background: var(--dsw-alias-bg-secondary, rgba(128,128,128,.12)); }
+.mcpm-pager { display: flex; align-items: center; justify-content: center; gap: 8px; }
+.mcpm-dialog { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.5)); border-radius: 8px; padding: 12px; }
+.mcpm-field { display: grid; grid-template-columns: 150px 1fr; align-items: center; gap: 8px; }
+.mcpm-field__label { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.mcpm-pre { margin: 0; padding: 8px; border-radius: 6px; overflow-x: auto; background: var(--dsw-alias-bg-secondary, rgba(128,128,128,.08)); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+.mcpm-error { color: var(--dsw-alias-text-danger, #c0392b); }
+.mcpm-note { color: var(--dsw-alias-text-secondary, inherit); line-height: 1.7; }
+.mcpm-required { color: var(--dsw-alias-text-danger, #c0392b); }
+.mcpm-actions { display: flex; gap: 8px; }
+.mcpm-empty { color: var(--dsw-alias-text-secondary, inherit); }
+`;
+
+    /** Human age of the snapshot, for the status line. */
+    function ageText(ms) {
+      if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '';
+      const minutes = Math.floor(ms / 60000);
+      if (minutes < 1) return '刚刚';
+      if (minutes < 60) return minutes + ' 分钟前';
+      const hours = Math.floor(minutes / 60);
+      if (hours < 24) return hours + ' 小时前';
+      return Math.floor(hours / 24) + ' 天前';
+    }
 
     /** How a generated row's live state reads on screen. */
     const STATE_LABEL = {
@@ -414,16 +484,326 @@ window.__ModuleLoader__.load({
       'no-loader': '状态未知',
     };
 
-    /** Human age of the snapshot, for the "offline data" line. */
-    function ageText(ms) {
-      if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '';
-      const minutes = Math.floor(ms / 60000);
-      if (minutes < 1) return '刚刚';
-      if (minutes < 60) return minutes + ' 分钟前';
-      const hours = Math.floor(minutes / 60);
-      if (hours < 24) return hours + ' 小时前';
-      return Math.floor(hours / 24) + ' 天前';
+    /** Inject the class table once per document, and hand back the disposer. */
+    function installMarketStyles() {
+      // No usable document means no page to style (a harness, a future non-DOM host):
+      // skip instead of throwing, because a throw out of `apply()` fails the whole web
+      // boot. The check is deliberately per-method — a partial `document` shim must not
+      // be able to take the boot down either.
+      if (typeof document === 'undefined' || document === null) return () => {};
+      if (typeof document.getElementById !== 'function'
+        || typeof document.createElement !== 'function'
+        || document.head === undefined || document.head === null) return () => {};
+      const existing = document.getElementById('mcpm-styles');
+      if (existing !== null && existing !== undefined) return () => {};
+      const element = document.createElement('style');
+      element.id = 'mcpm-styles';
+      element.textContent = MARKET_CSS;
+      document.head.appendChild(element);
+      return () => { element.remove(); };
     }
+
+    /**
+     * The nav entry's icon.
+     *
+     * A plain inline SVG with no style props: the panellist decides size and colour.
+     */
+    function MarketIcon() {
+      return h('svg', {
+        className: 'mcpm-navicon',
+        viewBox: '0 0 24 24',
+        width: 16,
+        height: 16,
+        fill: 'none',
+        stroke: 'currentColor',
+        strokeWidth: 1.6,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+        'aria-hidden': 'true',
+      },
+        h('path', { d: 'M4 8h16v11H4z' }),
+        h('path', { d: 'M4 8l3-4h10l3 4' }),
+        h('path', { d: 'M9 12h6' }),
+      );
+    }
+
+    /** The button state machine's state for one card. */
+    function cardStateOf(card) {
+      if (card.installedSlug) return card.updateAvailable ? 'update' : 'installed';
+      if (!card.installable) return 'unavailable';
+      return card.needsConfig ? 'needs-config' : 'idle';
+    }
+
+    /** The label that belongs to one card state. */
+    const CARD_ACTION = {
+      idle: '安装',
+      'needs-config': '安装 · 需密钥',
+      installed: '已安装 ✓',
+      update: '更新 ↑',
+      unavailable: '不可用',
+    };
+
+    /**
+     * One catalog card.
+     *
+     * Five semantic blocks in a fixed order — icon, name, description, badges, actions.
+     * The visual spec may rearrange them in CSS; the structure does not change.
+     */
+    function MarketCard(props) {
+      const { card, onInstall, onUninstall, onOpenInstalled } = props;
+      const state = cardStateOf(card);
+      const action = () => {
+        if (state === 'unavailable') return;
+        if (state === 'installed') { onOpenInstalled(card); return; }
+        onInstall(card);
+      };
+      return h('article', { className: 'mcpm-card', 'data-state': state },
+        h('div', { className: 'mcpm-card__icon', 'aria-hidden': 'true' }, '📦'),
+        h('h3', { className: 'mcpm-card__name' }, card.title || card.name),
+        h('p', { className: 'mcpm-card__desc' }, card.description || '（无描述）'),
+        h('div', { className: 'mcpm-card__badges' },
+          h('span', { className: 'mcpm-badge mcpm-badge--kind' }, card.registryType || (card.hasRemote ? 'remote' : '—')),
+          (card.kinds || []).map((kind) => h('span', { key: kind, className: 'mcpm-badge mcpm-badge--transport' }, kind)),
+          card.version ? h('span', { className: 'mcpm-badge mcpm-badge--version' }, 'v' + card.version) : null,
+          card.installedSlug ? h('span', { className: 'mcpm-badge mcpm-badge--installed' }, '已装') : null,
+          state === 'unavailable' ? h('span', { className: 'mcpm-badge mcpm-badge--unavailable' }, '不可用') : null,
+        ),
+        h('div', { className: 'mcpm-card__actions' },
+          h('button', {
+            type: 'button',
+            className: state === 'idle' || state === 'needs-config' || state === 'update' ? 'mcpm-btn mcpm-btn--primary' : 'mcpm-btn',
+            'data-state': state,
+            disabled: state === 'unavailable',
+            title: state === 'unavailable' ? card.unsupportedReason : card.name,
+            onClick: action,
+          }, CARD_ACTION[state]),
+        ),
+      );
+    }
+
+    /** The installed strip: the same card, plus a way out. */
+    function InstalledCard(props) {
+      const { item, busy, onUninstall } = props;
+      const state = item.updateAvailable ? 'update' : 'installed';
+      return h('article', { className: 'mcpm-card mcpm-card--installed', 'data-state': state },
+        h('div', { className: 'mcpm-card__icon', 'aria-hidden': 'true' }, '📦'),
+        h('h3', { className: 'mcpm-card__name' }, item.registryTitle || item.registryName),
+        h('p', { className: 'mcpm-card__desc' },
+          item.kind === 'http' ? item.url : [item.command, ...(item.args || [])].join(' ')),
+        h('div', { className: 'mcpm-card__badges' },
+          h('span', { className: 'mcpm-badge mcpm-badge--kind' }, item.kind === 'http' ? 'remote' : item.registryType),
+          h('span', { className: 'mcpm-badge mcpm-badge--state' }, STATE_LABEL[item.state] || item.state),
+          item.toolCount === null || item.toolCount === undefined
+            ? null
+            : h('span', { className: 'mcpm-badge mcpm-badge--tools' }, '✓ ' + item.toolCount + ' 个工具'),
+          item.updateAvailable
+            ? h('span', { className: 'mcpm-badge mcpm-badge--update' }, '目录版本 v' + item.latestVersion)
+            : null,
+        ),
+        h('div', { className: 'mcpm-card__actions' },
+          h('button', {
+            type: 'button',
+            className: 'mcpm-btn',
+            'data-state': 'installed',
+            disabled: busy === item.slug,
+            onClick: () => onUninstall(item),
+          }, busy === item.slug ? '卸载中…' : '卸载'),
+        ),
+        item.error ? h('p', { className: 'mcpm-error' }, item.error) : null,
+      );
+    }
+
+    /**
+     * The market page: the whole body of the「MCP 市场」nav entry.
+     *
+     * Pagination is deliberate — the catalog holds thousands of entries and the page keeps
+     * exact sorting and filtering, which virtual scrolling makes fragile.
+     */
+    function MarketPage() {
+      const [status, setStatus] = React.useState(null);
+      const [installed, setInstalled] = React.useState({ items: [], toolListing: false });
+      const [query, setQuery] = React.useState('');
+      const [kind, setKind] = React.useState('all');
+      const [sort, setSort] = React.useState('relevance');
+      const [page, setPage] = React.useState(0);
+      const [results, setResults] = React.useState({ total: 0, results: [] });
+      const [busy, setBusy] = React.useState('');
+      const [error, setError] = React.useState('');
+      const [dialog, setDialog] = React.useState('');
+      const [hint, setHint] = React.useState('');
+
+      const loadStatus = React.useCallback(async () => {
+        try {
+          setStatus(await marketStatus());
+        } catch (e) {
+          setError(String((e && e.message) || e));
+        }
+      }, []);
+      const loadInstalled = React.useCallback(async () => {
+        try {
+          setInstalled(await marketInstalled());
+        } catch (e) {
+          setError(String((e && e.message) || e));
+        }
+      }, []);
+      const runSearch = React.useCallback(async (q, k, s, p) => {
+        setBusy('search');
+        try {
+          setResults(await marketSearch(q, k, s, p * MARKET_PAGE_SIZE));
+        } catch (e) {
+          setError(String((e && e.message) || e));
+        } finally {
+          setBusy('');
+        }
+      }, []);
+
+      React.useEffect(() => {
+        loadStatus();
+        loadInstalled();
+        runSearch('', 'all', 'relevance', 0);
+      }, [loadStatus, loadInstalled, runSearch]);
+
+      const refreshing = !!(status && status.refreshing && status.refreshing.running);
+      React.useEffect(() => {
+        if (!refreshing) return undefined;
+        const timer = setInterval(() => { loadStatus(); }, 2500);
+        return () => clearInterval(timer);
+      }, [refreshing, loadStatus]);
+
+      const refresh = async () => {
+        setBusy('refresh');
+        setError('');
+        try {
+          await marketRefresh();
+          await loadStatus();
+        } catch (e) {
+          setError(String((e && e.message) || e));
+        } finally {
+          setBusy('');
+        }
+      };
+
+      const apply = (nextKind, nextSort, nextPage) => {
+        setKind(nextKind);
+        setSort(nextSort);
+        setPage(nextPage);
+        runSearch(query, nextKind, nextSort, nextPage);
+      };
+
+      const uninstall = async (item) => {
+        setBusy(item.slug);
+        setError('');
+        try {
+          await marketUninstall(item.slug);
+          await loadInstalled();
+          await runSearch(query, kind, sort, page);
+        } catch (e) {
+          setError(String((e && e.message) || e));
+        } finally {
+          setBusy('');
+        }
+      };
+
+      const pageCount = Math.max(1, Math.ceil(results.total / MARKET_PAGE_SIZE));
+      const runtimeLine = status
+        ? ['npx ' + (status.runtimes.npx.available ? '可用' : '缺失'),
+           'uvx ' + (status.runtimes.uvx.available ? '可用' : '缺失'),
+           'docker ' + (status.runtimes.docker.available ? '可用' : '缺失')].join(' · ')
+        : '';
+
+      return h('div', { className: 'mcpm-page' },
+        h('div', { className: 'mcpm-toolbar' },
+          h('input', {
+            className: 'mcpm-search',
+            placeholder: '搜索 MCP 服务器（名称 / 描述，本地搜索）',
+            value: query,
+            onChange: (event) => setQuery(event.target.value),
+            onKeyDown: (event) => { if (event.key === 'Enter') apply(kind, sort, 0); },
+          }),
+          h('div', { className: 'mcpm-filters' },
+            [['all', '全部'], ['local', '本地'], ['remote', '远程']].map(([value, label]) =>
+              h('button', {
+                key: value,
+                type: 'button',
+                className: 'mcpm-chip',
+                'data-active': kind === value ? 'true' : 'false',
+                onClick: () => apply(value, sort, 0),
+              }, label)),
+          ),
+          h('select', {
+            className: 'mcpm-select',
+            value: sort,
+            onChange: (event) => apply(kind, event.target.value, 0),
+          },
+            h('option', { value: 'relevance' }, '相关度'),
+            h('option', { value: 'newest' }, '最新上架'),
+            h('option', { value: 'name' }, '名称'),
+          ),
+          h('button', { type: 'button', className: 'mcpm-btn', 'data-state': 'idle', onClick: () => apply(kind, sort, 0) },
+            busy === 'search' ? '搜索中…' : '搜索'),
+          h('button', { type: 'button', className: 'mcpm-btn', 'data-state': refreshing ? 'busy' : 'idle', disabled: refreshing, onClick: refresh },
+            refreshing ? '刷新中…' : '刷新目录'),
+        ),
+
+        h('div', { className: 'mcpm-status' },
+          status
+            ? '目录：' + status.count + ' 个服务器 · 更新于 ' + ageText(status.ageMs) + (status.stale ? '（已过期，建议刷新）' : '') + ' · ' + runtimeLine
+            : '读取目录状态…',
+          status && status.source === 'none'
+            ? h('div', null, '还没有本地快照，点「刷新目录」拉一次全量（约 100 秒，之后都是本地搜索）。')
+            : null,
+          refreshing
+            ? h('div', null, '正在后台拉取：已 ' + status.refreshing.pages + ' 页 / ' + status.refreshing.rawEntries + ' 条，保留 ' + status.refreshing.kept + ' 个服务器。')
+            : null,
+          status && status.refreshing && status.refreshing.error
+            ? h('div', { className: 'mcpm-error' }, '上次刷新失败：' + status.refreshing.error + '（继续使用本地快照）')
+            : null,
+        ),
+
+        error ? h('div', { className: 'mcpm-error' }, error) : null,
+        hint ? h('div', { className: 'mcpm-note' }, hint) : null,
+
+        dialog !== ''
+          ? h(InstallDialog, {
+              name: dialog,
+              onClose: () => setDialog(''),
+              onDone: () => { loadInstalled(); loadStatus(); runSearch(query, kind, sort, page); },
+            })
+          : null,
+
+        installed.items.length > 0
+          ? h('section', { className: 'mcpm-section' },
+              h('h2', { className: 'mcpm-section-title' }, '已安装（' + installed.items.length + '）'),
+              h('div', { className: 'mcpm-grid' },
+                installed.items.map((item) => h(InstalledCard, { key: item.slug, item, busy, onUninstall: uninstall })),
+              ),
+            )
+          : null,
+
+        h('section', { className: 'mcpm-section' },
+          h('h2', { className: 'mcpm-section-title' }, '搜索结果（' + results.total + '）'),
+          results.results.length === 0
+            ? h('p', { className: 'mcpm-empty' }, '没有匹配的条目。')
+            : h('div', { className: 'mcpm-grid' },
+                results.results.map((card) => h(MarketCard, {
+                  key: card.name,
+                  card,
+                  onInstall: (hit) => { setHint(''); setDialog(hit.name); },
+                  onOpenInstalled: (hit) => setHint('「' + hit.title + '」已安装（组合包 ' + hit.installedSlug + '）。改配置请到左侧「插件」→ dsh-plugin-mcp-manager 的 MCP 行页签。'),
+                  onUninstall: uninstall,
+                })),
+              ),
+        ),
+
+        h('div', { className: 'mcpm-pager' },
+          h('button', { type: 'button', className: 'mcpm-btn', 'data-state': page === 0 ? 'unavailable' : 'idle', disabled: page === 0, onClick: () => apply(kind, sort, page - 1) }, '上一页'),
+          h('span', { className: 'mcpm-note' }, '第 ' + (page + 1) + ' / ' + pageCount + ' 页 · 每页 ' + MARKET_PAGE_SIZE),
+          h('button', { type: 'button', className: 'mcpm-btn', 'data-state': page + 1 >= pageCount ? 'unavailable' : 'idle', disabled: page + 1 >= pageCount, onClick: () => apply(kind, sort, page + 1) }, '下一页'),
+        ),
+      );
+    }
+
+    // ------------------------------------------------------------ market: install
 
     /** The argv of one plan, with unfilled argument slots shown as placeholders. */
     function argvOf(option, argumentValues) {
@@ -451,9 +831,10 @@ window.__ModuleLoader__.load({
     /**
      * The install confirmation.
      *
-     * The user sees, before anything runs: the exact command or URL, where the entry came
-     * from, which secrets it wants, and the fact that values are written to the profile's
-     * patch file in plain text.
+     * Before anything runs the user sees the exact command or URL, where the entry came
+     * from, which secrets it wants, and that values are written to the profile's patch file
+     * in plain text. This is the *configuration* form — it belongs to installing, not to
+     * browsing.
      */
     function InstallDialog(props) {
       const { name, onClose, onDone } = props;
@@ -479,7 +860,6 @@ window.__ModuleLoader__.load({
               }
             }
             setValues(initial);
-            // A reinstall remembers the argument values it was given last time.
             setArgValues((value.installed && value.installed.argumentValues) || {});
           } catch (e) {
             if (live) setError(String((e && e.message) || e));
@@ -504,105 +884,84 @@ window.__ModuleLoader__.load({
       };
 
       if (result !== null) {
-        return h('div', { style: { ...S.card, borderColor: 'var(--dsw-alias-border, rgba(128,128,128,.5))' } },
-          h('div', { style: S.rowTop },
-            h('span', { style: S.name }, '已安装'),
-            h('span', { style: S.tag }, result.pkg),
-            result.reinstalled ? h('span', { style: S.tag }, '覆盖更新') : null,
+        return h('div', { className: 'mcpm-dialog', 'data-state': 'installed' },
+          h('div', { className: 'mcpm-card__badges' },
+            h('span', { className: 'mcpm-badge mcpm-badge--installed' }, '已安装'),
+            h('span', { className: 'mcpm-badge' }, result.pkg),
+            result.reinstalled ? h('span', { className: 'mcpm-badge' }, '覆盖更新') : null,
           ),
-          h('div', { style: { ...S.muted, marginTop: 6 } },
-            'MCP 行已写进新组合包 ', h('code', { style: S.mono }, result.dir),
-            '，serverName 为 ', h('code', { style: S.mono }, result.serverName), '。'),
-          h('div', { style: { ...S.muted, marginTop: 4 } },
-            '它出现在「MCP 行」页签里；工具以 ', h('code', { style: S.mono }, 'mcp__' + result.serverName + '__*'), ' 的名字提供给模型。'),
-          h('div', { style: { display: 'flex', gap: 8, marginTop: 10 } },
-            h('button', { style: S.btnPrimary, onClick: onClose }, '关闭'),
+          h('p', { className: 'mcpm-note' },
+            'MCP 行已写进新组合包 ' + result.dir + '，serverName 为 ' + result.serverName + '。'),
+          h('p', { className: 'mcpm-note' },
+            '工具以 mcp__' + result.serverName + '__* 的名字提供给模型；改配置到左侧「插件」→ MCP 行。'),
+          h('div', { className: 'mcpm-actions' },
+            h('button', { type: 'button', className: 'mcpm-btn mcpm-btn--primary', 'data-state': 'idle', onClick: onClose }, '关闭'),
           ),
         );
       }
 
-      return h('div', { style: { ...S.card, borderColor: 'var(--dsw-alias-border, rgba(128,128,128,.5))' } },
-        h('div', { style: S.rowTop },
-          h('span', { style: S.name }, detail ? detail.server.title : name),
-          h('span', { style: S.tag }, name),
-          detail && detail.server.version ? h('span', { style: S.tag }, 'v' + detail.server.version) : null,
-          h('span', { style: { ...S.tag, ...S.muted } }, '来源：官方 MCP 注册表'),
-          h('span', { style: { flex: 1 } }),
-          h('button', { style: S.btn, onClick: onClose }, '取消'),
+      return h('div', { className: 'mcpm-dialog' },
+        h('div', { className: 'mcpm-card__badges' },
+          h('span', { className: 'mcpm-card__name' }, detail ? detail.server.title : name),
+          h('span', { className: 'mcpm-badge' }, name),
+          detail && detail.server.version ? h('span', { className: 'mcpm-badge' }, 'v' + detail.server.version) : null,
+          h('span', { className: 'mcpm-badge mcpm-badge--source' }, '来源：官方 MCP 注册表'),
         ),
-        detail && detail.server.description
-          ? h('div', { style: { ...S.muted, marginTop: 6 } }, detail.server.description)
-          : null,
-
-        !detail && !error ? h('div', { style: { ...S.muted, marginTop: 8 } }, '读取安装方式…') : null,
-        error ? h('div', { style: S.err }, error) : null,
+        detail && detail.server.description ? h('p', { className: 'mcpm-note' }, detail.server.description) : null,
+        !detail && !error ? h('p', { className: 'mcpm-note' }, '读取安装方式…') : null,
+        error ? h('div', { className: 'mcpm-error' }, error) : null,
 
         detail && detail.options.length === 0
-          ? h('div', { style: S.err }, '这个条目在这台机器上没有可用的安装方式：',
+          ? h('div', { className: 'mcpm-error' }, '这个条目在这台机器上没有可用的安装方式：' +
               (detail.blocked || []).map((item) => item.registryType + '（' + item.reason + '）').join('；'))
           : null,
 
         detail && detail.options.length > 1
-          ? h('div', { style: { marginTop: 8 } },
-              h('div', { style: S.label }, '安装方式'),
-              detail.options.map((item, index) => h('label', {
-                key: item.label,
-                style: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 4, cursor: 'pointer' },
-              },
-                h('input', {
-                  type: 'radio',
-                  checked: index === optionIndex,
-                  onChange: () => setOptionIndex(index),
-                }),
+          ? h('div', null,
+              h('div', { className: 'mcpm-note' }, '安装方式'),
+              detail.options.map((item, index) => h('label', { key: item.label, className: 'mcpm-field' },
+                h('input', { type: 'radio', checked: index === optionIndex, onChange: () => setOptionIndex(index) }),
                 h('span', null, item.label),
               )),
             )
           : null,
 
         option
-          ? h('div', { style: { marginTop: 10 } },
-              h('div', { style: S.label }, option.kind === 'http' ? '将连接到的地址' : '将执行的命令'),
-              h('pre', { style: S.pre }, commandLineOf(option, argValues)),
-              h('div', { style: { ...S.muted, marginTop: 4 } }, '⚠️ ' + option.risk),
+          ? h('div', null,
+              h('div', { className: 'mcpm-note' }, option.kind === 'http' ? '将连接到的地址' : '将执行的命令'),
+              h('pre', { className: 'mcpm-pre' }, commandLineOf(option, argValues)),
+              h('div', { className: 'mcpm-note' }, '⚠️ ' + option.risk),
             )
           : null,
 
         option && (option.slots || []).length > 0
-          ? h('div', { style: { marginTop: 10 } },
-              h('div', { style: S.label }, '命令参数'),
-              (option.slots || []).map((slot) => h('div', { key: slot.name, style: S.field },
-                h('label', { style: { ...S.label, ...S.mono } },
-                  slot.name,
-                  slot.isRequired ? h('span', { style: S.err }, ' *') : null),
+          ? h('div', null,
+              h('div', { className: 'mcpm-note' }, '命令参数'),
+              (option.slots || []).map((slot) => h('div', { key: slot.name, className: 'mcpm-field' },
+                h('label', { className: 'mcpm-field__label' }, slot.name, slot.isRequired ? h('span', { className: 'mcpm-required' }, ' *') : null),
                 h('input', {
-                  style: S.input,
                   type: 'text',
                   placeholder: slot.format || (slot.isRequired ? '必填' : '可留空'),
                   value: argValues[slot.name] === undefined ? '' : argValues[slot.name],
                   onChange: (event) => setArgValues((current) => ({ ...current, [slot.name]: event.target.value })),
                 }),
               )),
-              h('div', { style: { ...S.muted, marginTop: 4 } },
-                '这个 server 要求命令行参数（如目录路径）；留空则不带该参数。'),
             )
           : null,
 
         option && option.variables.length > 0
-          ? h('div', { style: { marginTop: 10 } },
-              h('div', { style: S.label }, '需要填写'),
-              option.variables.map((variable) => h('div', { key: variable.name, style: S.field },
-                h('label', { style: { ...S.label, ...S.mono } },
-                  variable.name,
-                  variable.isRequired ? h('span', { style: S.err }, ' *') : null),
+          ? h('div', null,
+              h('div', { className: 'mcpm-note' }, '需要填写'),
+              option.variables.map((variable) => h('div', { key: variable.name, className: 'mcpm-field' },
+                h('label', { className: 'mcpm-field__label' }, variable.name, variable.isRequired ? h('span', { className: 'mcpm-required' }, ' *') : null),
                 h('input', {
-                  style: S.input,
                   type: variable.isSecret ? 'password' : 'text',
                   placeholder: variable.default || (variable.isRequired ? '必填' : '可留空'),
                   value: values[variable.name] === undefined ? '' : values[variable.name],
                   onChange: (event) => setValues((current) => ({ ...current, [variable.name]: event.target.value })),
                 }),
               )),
-              h('div', { style: { ...S.muted, marginTop: 4 } },
+              h('div', { className: 'mcpm-note' },
                 '这些值会写进 profile 的 cordis.patch.yml（明文）。',
                 detail && detail.installed && (detail.installed.configKeys || []).length > 0
                   ? '已配置 ' + detail.installed.configKeys.join('、') + '，留空则保留原值。'
@@ -611,223 +970,19 @@ window.__ModuleLoader__.load({
           : null,
 
         option && option.variables.length === 0 && (option.slots || []).length === 0
-          ? h('div', { style: { ...S.muted, marginTop: 10 } }, '这个条目不需要填写任何配置。')
+          ? h('div', { className: 'mcpm-note' }, '这个条目不需要填写任何配置。')
           : null,
 
         detail && (detail.blocked || []).length > 0
-          ? h('div', { style: { ...S.muted, marginTop: 8 } },
-              '其它方式：' + detail.blocked.map((item) => item.registryType + '（' + item.reason + '）').join('；'))
+          ? h('div', { className: 'mcpm-note' }, '其它方式：' + detail.blocked.map((item) => item.registryType + '（' + item.reason + '）').join('；'))
           : null,
 
         option
-          ? h('div', { style: { display: 'flex', gap: 8, marginTop: 12 } },
-              h('button', { style: S.btnPrimary, disabled: busy, onClick: install },
-                busy ? '安装中…' : '安装'),
-              h('button', { style: S.btn, disabled: busy, onClick: onClose }, '取消'),
+          ? h('div', { className: 'mcpm-actions' },
+              h('button', { type: 'button', className: 'mcpm-btn mcpm-btn--primary', 'data-state': busy ? 'busy' : 'idle', disabled: busy, onClick: install }, busy ? '安装中…' : '安装'),
+              h('button', { type: 'button', className: 'mcpm-btn', 'data-state': 'idle', disabled: busy, onClick: onClose }, '取消'),
             )
           : null,
-      );
-    }
-
-    // -------------------------------------------------------------- market: panel
-
-    /** The market tab: catalog status, installed market bundles, and local search. */
-    function MarketPanel(props) {
-      const { onInstalled } = props;
-      const [status, setStatus] = React.useState(null);
-      const [installed, setInstalled] = React.useState({ items: [], toolListing: false });
-      const [query, setQuery] = React.useState('');
-      const [kind, setKind] = React.useState('all');
-      const [sort, setSort] = React.useState('relevance');
-      const [results, setResults] = React.useState({ total: 0, results: [] });
-      const [busy, setBusy] = React.useState('');
-      const [error, setError] = React.useState('');
-      const [dialog, setDialog] = React.useState('');
-
-      const loadStatus = React.useCallback(async () => {
-        try {
-          setStatus(await marketStatus());
-        } catch (e) {
-          setError(String((e && e.message) || e));
-        }
-      }, []);
-      const loadInstalled = React.useCallback(async () => {
-        try {
-          setInstalled(await marketInstalled());
-        } catch (e) {
-          setError(String((e && e.message) || e));
-        }
-      }, []);
-      const runSearch = React.useCallback(async (q, k, s) => {
-        setBusy('search');
-        try {
-          setResults(await marketSearch(q, k, s));
-        } catch (e) {
-          setError(String((e && e.message) || e));
-        } finally {
-          setBusy('');
-        }
-      }, []);
-
-      React.useEffect(() => {
-        loadStatus();
-        loadInstalled();
-        runSearch('', 'all', 'relevance');
-      }, [loadStatus, loadInstalled, runSearch]);
-
-      // A refresh runs for minutes on the Host; poll while it does.
-      const refreshing = !!(status && status.refreshing && status.refreshing.running);
-      React.useEffect(() => {
-        if (!refreshing) return undefined;
-        const timer = setInterval(() => { loadStatus(); }, 2500);
-        return () => clearInterval(timer);
-      }, [refreshing, loadStatus]);
-
-      const refresh = async () => {
-        setBusy('refresh');
-        setError('');
-        try {
-          await marketRefresh();
-          await loadStatus();
-        } catch (e) {
-          setError(String((e && e.message) || e));
-        } finally {
-          setBusy('');
-        }
-      };
-
-      const uninstall = async (slug) => {
-        setBusy(slug);
-        setError('');
-        try {
-          await marketUninstall(slug);
-          await loadInstalled();
-          if (onInstalled) onInstalled();
-        } catch (e) {
-          setError(String((e && e.message) || e));
-        } finally {
-          setBusy('');
-        }
-      };
-
-      const runtimeLine = status
-        ? [
-            'npx ' + (status.runtimes.npx.available ? '可用' : '缺失'),
-            'uvx ' + (status.runtimes.uvx.available ? '可用' : '缺失'),
-            'docker ' + (status.runtimes.docker.available ? '可用' : '缺失'),
-          ].join(' · ')
-        : '';
-
-      return h('div', null,
-        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
-          h('input', {
-            style: { ...S.input, flex: '1 1 220px' },
-            placeholder: '搜索 MCP 服务器（名称 / 描述，本地搜索）',
-            value: query,
-            onChange: (event) => setQuery(event.target.value),
-            onKeyDown: (event) => { if (event.key === 'Enter') runSearch(query, kind, sort); },
-          }),
-          h('select', {
-            style: S.input,
-            value: kind,
-            onChange: (event) => { setKind(event.target.value); runSearch(query, event.target.value, sort); },
-          },
-            h('option', { value: 'all' }, '全部'),
-            h('option', { value: 'local' }, '可本地安装'),
-            h('option', { value: 'remote' }, '仅远程'),
-          ),
-          h('select', {
-            style: S.input,
-            value: sort,
-            onChange: (event) => { setSort(event.target.value); runSearch(query, kind, event.target.value); },
-          },
-            h('option', { value: 'relevance' }, '相关度'),
-            h('option', { value: 'newest' }, '最新上架'),
-            h('option', { value: 'name' }, '名称'),
-          ),
-          h('button', { style: S.btn, onClick: () => runSearch(query, kind, sort) }, busy === 'search' ? '搜索中…' : '搜索'),
-          h('button', { style: S.btn, disabled: refreshing, onClick: refresh }, refreshing ? '刷新中…' : '刷新目录'),
-        ),
-
-        h('div', { style: { ...S.muted, marginTop: 6, lineHeight: 1.7 } },
-          status
-            ? '目录：' + status.count + ' 个服务器 · 更新于 ' + ageText(status.ageMs) +
-              (status.stale ? '（已过期，建议刷新）' : '') + ' · ' + runtimeLine
-            : '读取目录状态…',
-          status && status.source === 'none'
-            ? h('div', null, '还没有本地快照，点「刷新目录」拉一次全量（约 100 秒，之后都是本地搜索）。')
-            : null,
-          refreshing
-            ? h('div', null, '正在后台拉取：已 ' + status.refreshing.pages + ' 页 / ' +
-                status.refreshing.rawEntries + ' 条，保留 ' + status.refreshing.kept + ' 个服务器。')
-            : null,
-          status && status.refreshing && status.refreshing.error
-            ? h('div', { style: S.err }, '上次刷新失败：' + status.refreshing.error + '（继续使用本地快照）')
-            : null,
-        ),
-
-        error ? h('div', { style: S.err }, error) : null,
-
-        dialog !== ''
-          ? h(InstallDialog, {
-              name: dialog,
-              onClose: () => setDialog(''),
-              onDone: () => { loadInstalled(); loadStatus(); },
-            })
-          : null,
-
-        installed.items.length > 0
-          ? h('div', { style: { marginTop: 14 } },
-              h('div', { style: { ...S.title, marginBottom: 6 } }, '从市场安装的（' + installed.items.length + '）'),
-              installed.items.map((item) => h('div', { key: item.slug, style: S.card },
-                h('div', { style: S.rowTop },
-                  h('span', { style: S.name }, item.registryTitle || item.registryName),
-                  h('span', { style: { ...S.tag, ...S.muted } }, item.kind === 'http' ? '远程' : item.registryType),
-                  h('span', { style: { ...S.tag, ...(item.state === 'active' ? S.muted : S.err) } },
-                    STATE_LABEL[item.state] || item.state),
-                  item.toolCount !== null && item.toolCount !== undefined
-                    ? h('span', { style: { ...S.tag, ...S.muted } }, '✓ ' + item.toolCount + ' 个工具')
-                    : (installed.toolListing === false
-                        ? h('span', { style: { ...S.tag, ...S.muted } }, '工具数未知')
-                        : null),
-                  item.updateAvailable
-                    ? h('span', { style: { ...S.tag, ...S.muted } }, '目录版本 v' + item.latestVersion + '（不同）')
-                    : null,
-                  h('span', { style: { flex: 1 } }),
-                  h('button', {
-                    style: S.btn,
-                    disabled: busy === item.slug,
-                    onClick: () => uninstall(item.slug),
-                  }, busy === item.slug ? '卸载中…' : '卸载'),
-                ),
-                h('div', { style: { ...S.mono, ...S.muted, marginTop: 4, wordBreak: 'break-all' } },
-                  item.kind === 'http' ? item.url : (item.command || '') + ' ' + ((item.args || []).join(' '))),
-                h('div', { style: { ...S.muted, marginTop: 2 } },
-                  'serverName ' + item.serverName + ' · 组合包 ' + item.pkg +
-                  (item.configKeys && item.configKeys.length > 0 ? ' · 已配置 ' + item.configKeys.join(', ') : '')),
-                item.error ? h('div', { style: S.err }, item.error) : null,
-              )),
-            )
-          : null,
-
-        h('div', { style: { marginTop: 14 } },
-          h('div', { style: { ...S.title, marginBottom: 6 } },
-            '搜索结果（' + results.total + '）'),
-          results.results.length === 0
-            ? h('div', { style: S.muted }, '没有匹配的条目。')
-            : results.results.map((hit) => h('div', { key: hit.name, style: S.card },
-                h('div', { style: S.rowTop },
-                  h('span', { style: S.name }, hit.title),
-                  hit.version ? h('span', { style: { ...S.tag, ...S.muted } }, 'v' + hit.version) : null,
-                  h('span', { style: S.tag }, hit.hasLocal ? (hit.types.filter((t) => t === 'npm' || t === 'pypi').join('/') || '本地') : '远程'),
-                  hit.hasRemote && hit.hasLocal ? h('span', { style: { ...S.tag, ...S.muted } }, '也可远程') : null,
-                  h('span', { style: { flex: 1 } }),
-                  h('button', { style: S.btnPrimary, onClick: () => setDialog(hit.name) }, '安装'),
-                ),
-                h('div', { style: { ...S.mono, ...S.muted, marginTop: 3 } }, hit.name),
-                hit.description ? h('div', { style: { ...S.muted, marginTop: 3 } }, hit.description) : null,
-              )),
-        ),
       );
     }
 
@@ -835,7 +990,6 @@ window.__ModuleLoader__.load({
 
     function Panel() {
       const [state, setState] = React.useState({ status: 'loading', value: null, error: '' });
-      const [tab, setTab] = React.useState('rows');
       const [note, setNote] = React.useState('');
 
       const load = React.useCallback(async () => {
@@ -876,39 +1030,27 @@ window.__ModuleLoader__.load({
           h('button', { style: S.btn, onClick: load }, '刷新'),
         ),
 
-        h('div', { style: { display: 'flex', gap: 6, marginBottom: 10 } },
-          h('button', {
-            style: tab === 'rows' ? S.btnPrimary : S.btn,
-            onClick: () => setTab('rows'),
-          }, 'MCP 行'),
-          h('button', {
-            style: tab === 'market' ? S.btnPrimary : S.btn,
-            onClick: () => setTab('market'),
-          }, '市场'),
-        ),
+        h('div', { style: { ...S.muted, marginBottom: 10 } },
+          '安装新的 MCP 服务器请到左侧导航的「MCP 市场」；这里管理已经装好的行。'),
 
         note ? h('div', { style: { ...S.muted, marginBottom: 8 } }, note) : null,
 
-        tab === 'market'
-          ? h(MarketPanel, { onInstalled: load })
-          : h('div', null,
-              state.error ? h('div', { style: S.err }, state.error) : null,
+        state.error ? h('div', { style: S.err }, state.error) : null,
 
-              state.status === 'ready' && !state.error && rows.length === 0
-                ? h('div', { style: S.muted },
-                    '当前 profile 里没有 @deepseek-ai/dsh-mcp-client 行。去「市场」装一个，或装一个 MCP 组合包后回到这里刷新。')
-                : null,
+        state.status === 'ready' && !state.error && rows.length === 0
+          ? h('div', { style: S.muted },
+              '当前 profile 里没有 @deepseek-ai/dsh-mcp-client 行。去左侧「MCP 市场」装一个，或装一个 MCP 组合包后回到这里刷新。')
+          : null,
 
-              rows.map((row) => h(Row, { key: row.id || Math.random().toString(36), row, onReload: load })),
+        rows.map((row) => h(Row, { key: row.id || Math.random().toString(36), row, onReload: load })),
 
-              h('div', { style: { ...S.muted, marginTop: 12, lineHeight: 1.7 } },
-                '改动写进当前 profile 的 cordis.patch.yml（由 DSH 的配置编辑服务落盘并热应用）；',
-                '带 * 的字段表示这一行已在 profile 里覆盖过。',
-                '「恢复默认」会移除覆盖项、回到组合包声明的值。',
-                caps.write === false ? '（注意：本 profile 未挂载 configEditor，只能读。）' : '',
-                caps.rowPages === false ? '（有行缺少所属组合包信息，逐行配置页暂不可用。）' : '',
-              ),
-            ),
+        h('div', { style: { ...S.muted, marginTop: 12, lineHeight: 1.7 } },
+          '改动写进当前 profile 的 cordis.patch.yml（由 DSH 的配置编辑服务落盘并热应用）；',
+          '带 * 的字段表示这一行已在 profile 里覆盖过。',
+          '「恢复默认」会移除覆盖项、回到组合包声明的值。',
+          caps.write === false ? '（注意：本 profile 未挂载 configEditor，只能读。）' : '',
+          caps.rowPages === false ? '（有行缺少所属组合包信息，逐行配置页暂不可用。）' : '',
+        ),
       );
     }
 
@@ -971,6 +1113,35 @@ window.__ModuleLoader__.load({
             key: BUNDLE,
           }, CallsTitle)));
         });
+
+        // The market is its own page in the left navigation, not a tab inside the manager:
+        // browsing and configuring are different jobs with different densities. Two slots
+        // carry it — `sidebar.panellist` for the nav entry and `main` for the page body,
+        // addressed by the same id. Both are declaration-aware, so registration order
+        // against the sidebar does not matter.
+        ctx.effect(() => installMarketStyles());
+        ctx.slots.inject('main', () => ctx.slots.inject('sidebar.panellist', () => {
+          const stopMain = ctx.slots.register({ name: 'main', key: MARKET_PANEL_ID }, MarketPage);
+          let stopIcon;
+          try {
+            stopIcon = ctx.slots.register({
+              name: 'sidebar.panellist',
+              id: MARKET_PANEL_ID,
+              order: MARKET_PANEL_ORDER,
+              label: () => 'MCP 市场',
+            }, MarketIcon);
+          } catch (error) {
+            // A nav slot this shell refuses must cost the nav entry, never the boot: a
+            // throw out of `apply()` fails the whole web boot.
+            console.warn('[mcp-manager] nav entry rejected:', error);
+            stopMain();
+            return () => {};
+          }
+          return () => {
+            stopIcon?.();
+            stopMain();
+          };
+        }));
       },
     };
   },

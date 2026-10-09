@@ -191,6 +191,33 @@ test('a short pull keeps the previous snapshot instead of blanking the market', 
   assert.equal(market.catalog().count, 2, 'the previous snapshot must survive a failed pull');
 });
 
+test('card state: installable, needs-config, installed and update are decided on the host', () => {
+  const plain = market.normalize(entry('x/plain', { packages: [npmPackage('x-plain')] }));
+  const keyed = market.normalize(entry('x/keyed', { packages: [npmPackage('x-keyed', [{ name: 'K', isRequired: true, isSecret: true }])] }));
+  const sse = market.normalize(entry('x/sse', { remotes: [{ type: 'sse', url: 'https://x.test/sse' }] }));
+  const oci = market.normalize(entry('x/oci', { packages: [{ registryType: 'oci', identifier: 'ghcr.io/x', transport: { type: 'stdio' } }] }));
+  const runtimes = market.detectRuntimes();
+
+  const idle = market.cardStateFor(plain, runtimes);
+  assert.equal(idle.installable, true);
+  assert.equal(idle.needsConfig, false);
+  assert.equal(idle.installedSlug, '');
+
+  assert.equal(market.cardStateFor(keyed, runtimes).needsConfig, true, 'a required secret makes the card say so');
+  const unsupported = market.cardStateFor(sse, runtimes);
+  assert.equal(unsupported.installable, false);
+  assert.match(unsupported.unsupportedReason, /sse/);
+  assert.match(market.cardStateFor(oci, runtimes).unsupportedReason, /oci/);
+
+  // Installed, then the registry moves on: inequality only, no ordering claim.
+  const installed = new Map([['x/plain', { slug: 'x-plain-000000', registryVersion: '1.2.3' }]]);
+  const same = market.cardStateFor(plain, runtimes, installed);
+  assert.equal(same.installedSlug, 'x-plain-000000');
+  assert.equal(same.updateAvailable, false);
+  const moved = market.cardStateFor({ ...plain, version: '9.9.9' }, runtimes, installed);
+  assert.equal(moved.updateAvailable, true);
+});
+
 test('serverName stays inside the client contract and avoids collisions', () => {
   assert.equal(market.serverNameFor('agency.kesey/pretrip', []), 'pretrip');
   assert.equal(market.serverNameFor('vendor.example/mcp', []), 'vendor-example', 'a generic last segment falls back to the vendor');

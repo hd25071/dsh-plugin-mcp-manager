@@ -61,17 +61,50 @@ package.json
 | `api/mcp-manager/calls` | GET | 某个会话的 MCP 调用记录（`?sessionId=&limit=`，缺省取最新会话） |
 | `api/mcp-manager/market` | GET | 目录状态：条数、更新时间、是否过期、**刷新进度**、本机运行时（npx/uvx/docker）、缓存路径 |
 | `api/mcp-manager/market/refresh` | POST | 启动一次全量拉取（后台跑，立即返回；前端轮询上面的状态） |
-| `api/mcp-manager/market/search` | GET | **本地**搜索：`?q=&kind=all\|local\|remote&sort=relevance\|newest\|name&limit=&offset=` |
-| `api/mcp-manager/market/detail` | GET | 一个条目的全部安装方式（`?name=`）+ 需要填的变量 + 风险说明 |
-| `api/mcp-manager/market/install` | POST | 安装：`{name, optionIndex, config}` → 写组合包 → `pluginManager.installBundle()` |
+| `api/mcp-manager/market/search` | GET | **本地**搜索 + 分页：`?q=&kind=all\|local\|remote&sort=relevance\|newest\|name&limit=&offset=`；**每张卡片自带状态**（能否安装/是否需要密钥/是否已装/是否有新版），网格只需一次请求 |
+| `api/mcp-manager/market/detail` | GET | 一个条目的全部安装方式（`?name=`）+ 需要填的变量与命令参数 + 风险说明 |
+| `api/mcp-manager/market/install` | POST | 安装：`{name, optionIndex, config, arguments}` → 写组合包 → `pluginManager.installBundle()` |
 | `api/mcp-manager/market/uninstall` | POST | 卸载：`{slug}` → `removeBundle()` → 删生成目录 |
 | `api/mcp-manager/market/installed` | GET | 已装列表：manifest + 行实时状态 + 工具数 + 是否有新版 |
 | `api/mcp-manager/health` | GET | 诊断：本 profile 挂了哪些服务 |
 
+### 三个界面分别挂在哪
+
+| 界面 | 位置 | 注册方式 |
+| --- | --- | --- |
+| **MCP 市场** | **左侧导航的一级入口**（排在「插件」下面） | `ctx.slots.register({name:'sidebar.panellist', id:'mcp-market', order:5, label}, Icon)` + 同 id 的 `{name:'main', key:'mcp-market'}` 正文 |
+| MCP 行管理 + 配置编辑 | 插件页里本组合包自己的页面 | `plugins.bundle.config`（key = 包名，`view: 'page'`） |
+| 调用记录 | 右侧停靠栏的独立页 | `sidebarRightTabs.register(...)` + `sidebar.right.pane.tab` |
+
+**为什么市场不放在管理器的页签里**：管理器面向"已经装好、要改字段"的人（逐字段表单、密度高），市场面向"还没装、在逛"的人
+（卡片流、一键装、密度低）。两者的心智模型相反，挤在一个页签容器里，市场永远像一张配置表。
+现在安装配置表单只在**点「安装」之后**出现——那才是它该出现的地方。
+
+左侧导航是**公开席位**，不是宿主写死的：官方「插件」入口自己就是用 `sidebar.panellist` 注册的
+（`dsh-client-ui-plugin-manager/lib/client.js:3769`，`order: 0`），本 profile 里第三方插件也在用
+（技能中心 `skill-explorer`、记忆系统 `mnemon`，都是 `order: 30`）。**本插件占用 `order: 5`**——
+后来者请避开这个号。
+
+### 市场页骨架的样式契约
+
+视觉规范要能"只换一层"，骨架阶段就必须守住三条（都有用例把守）：
+
+1. **样式只挂语义 class，组件里没有任何内联 style**：`mcpm-page` / `mcpm-toolbar` / `mcpm-grid` / `mcpm-card` /
+   `mcpm-card__{icon,name,desc,badges,actions}` / `mcpm-badge` / `mcpm-btn(--primary)` / `mcpm-pager` / `mcpm-dialog`…
+   整张表是 `client.js` 里**一个 `MARKET_CSS` 常量**，注入为一个 `<style id="mcpm-styles">`；换规范 = 换这一块。
+   用例会遍历市场页的渲染树，断言**零个 `style` prop**。
+2. **按钮状态走 `data-state`，不靠 class 堆叠**：`idle` / `needs-config` / `installed` / `update` / `unavailable`（另有 `busy`），
+   样式侧用 `[data-state="…"]` 选择器映射颜色。用例断言状态枚举与语义 class 齐备。
+3. **卡片层级靠结构，不靠样式**：图标 → 名称 → 描述 → 徽章 → 动作，五块顺序与包含关系固定；
+   规范只改它们怎么排（网格/字号/截断），不改 JSX。
+
+**分页而不是虚拟滚动**：7287 条卡片全量渲染必卡，而市场带排序/筛选，虚拟滚动与之联动最容易出 bug。
+每页 60，`limit`/`offset` 走宿主路由，页码与总数显示在页脚。
+
 ### 市场是怎么落地的（设计要点）
 
 ```text
-官方 registry ──全量拉取(~200 页 / ~20k 条 / ~100 秒, 后台跑)──▶ ~/.dsh/mcp-servers/market-cache.json
+官方 registry ──全量拉取(~200 页 / ~20k 条 / ~100 秒, 后台跑)──▶ ~/.dsh/mcp-market/market-cache.json
                                                                         │  本地搜索，永不联网
                     点「安装」                                          ▼
    ~/.dsh/mcp-servers/<slug>/{package.json, cordis.patch.yml, market.meta.json}

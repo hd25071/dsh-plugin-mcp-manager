@@ -698,11 +698,15 @@ function marketRefreshResponse() {
  */
 function marketSearchResponse(request) {
   const params = new URL(request.url).searchParams;
+  const runtimes = market.detectRuntimes();
+  const installed = new Map(market.listInstalled().map((item) => [item.registryName, item]));
   const found = market.searchCatalog(params.get('q') || '', {
     kind: params.get('kind') || 'all',
     sort: params.get('sort') || 'relevance',
     limit: Number(params.get('limit')),
     offset: Number(params.get('offset')),
+    // Every card carries its own state, so the whole grid renders from one request.
+    decorate: (server) => market.cardStateFor(server, runtimes, installed),
   });
   const state = market.catalog();
   return json({

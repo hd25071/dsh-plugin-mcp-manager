@@ -270,6 +270,34 @@ test('an SSE-only entry is refused with a reason instead of minting a dead row',
   assert.equal(calls.install.length, 0);
 });
 
+test('search paginates and decorates every card with its state', async () => {
+  seedCache();
+  const { routes } = makeCtx();
+
+  const first = await call(routes, host.MARKET_SEARCH_PATH, host.MARKET_SEARCH_PATH + '?limit=2&offset=0');
+  assert.equal(first.body.value.limit, 2);
+  assert.equal(first.body.value.offset, 0);
+  assert.equal(first.body.value.results.length, 2);
+  assert.equal(first.body.value.total, 4);
+  // Each card carries its own state, so the grid needs no second request.
+  for (const card of first.body.value.results) {
+    assert.equal(typeof card.installable, 'boolean');
+    assert.equal(typeof card.needsConfig, 'boolean');
+    assert.equal(typeof card.installedSlug, 'string');
+  }
+  const sse = await call(routes, host.MARKET_SEARCH_PATH, host.MARKET_SEARCH_PATH + '?q=legacy-sse');
+  assert.equal(sse.body.value.results[0].installable, false);
+  assert.match(sse.body.value.results[0].unsupportedReason, /sse/);
+  const tree = await call(routes, host.MARKET_SEARCH_PATH, host.MARKET_SEARCH_PATH + '?q=tree');
+  assert.equal(tree.body.value.results[0].needsConfig, true, 'a required command argument counts as needing configuration');
+  const keyed = await call(routes, host.MARKET_SEARCH_PATH, host.MARKET_SEARCH_PATH + '?q=notes');
+  assert.equal(keyed.body.value.results[0].needsConfig, true, 'a required secret counts as needing configuration');
+
+  const second = await call(routes, host.MARKET_SEARCH_PATH, host.MARKET_SEARCH_PATH + '?limit=2&offset=2');
+  assert.equal(second.body.value.results.length, 2);
+  assert.equal(second.body.value.results[0].name !== first.body.value.results[0].name, true, 'page two must not repeat page one');
+});
+
 test('the installed list compares versions by inequality only', async () => {
   seedCache();
   const { routes } = makeCtx();
