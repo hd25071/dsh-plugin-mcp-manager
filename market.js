@@ -34,11 +34,30 @@ import { delimiter, join } from 'node:path';
 export const REGISTRY_BASE = 'https://registry.modelcontextprotocol.io/v0/servers';
 /** Snapshot freshness window; past it the UI offers a refresh and keeps serving the cache. */
 export const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-/** Where generated bundles and the snapshot live. */
+/**
+ * Cache format version. The registry schema is still moving, so a cache written by an
+ * older app is discarded rather than misread.
+ */
+export const CACHE_VERSION = 1;
+/**
+ * A pull that yields fewer entries than this is treated as a failed pull: the registry
+ * serves thousands, so a short answer means an outage or a changed API, and overwriting a
+ * good snapshot with it would blank the market page.
+ */
+export const MIN_SNAPSHOT_ENTRIES = 1000;
+/**
+ * Generated bundles live here. The snapshot deliberately does NOT: this directory is the
+ * natural candidate for `hmr.root` (so generated patches hot-apply), and rewriting a
+ * multi-megabyte cache inside a watched directory would fire HMR on every refresh.
+ */
 export const MARKET_ROOT = join(homedir(), '.dsh', 'mcp-servers');
-export const CACHE_PATH = join(MARKET_ROOT, 'market-cache.json');
+/** The snapshot's own directory, outside anything HMR may watch. */
+export const CACHE_DIR = join(homedir(), '.dsh', 'mcp-market');
+export const CACHE_PATH = join(CACHE_DIR, 'market-cache.json');
 /** Package-name prefix of a generated bundle. */
 export const BUNDLE_PREFIX = '@dsh-mcp-market/';
+/** Row-id prefix of a generated row, kept distinct from hand-written rows. */
+export const ROW_PREFIX = 'mcp-';
 /** The registry's per-version metadata block. */
 const OFFICIAL_META = 'io.modelcontextprotocol.registry/official';
 const PAGE_LIMIT = 100;
@@ -52,9 +71,14 @@ function ensureRoot() {
   mkdirSync(MARKET_ROOT, { recursive: true });
 }
 
+/** mkdir -p the snapshot directory. */
+function ensureCacheDir() {
+  mkdirSync(CACHE_DIR, { recursive: true });
+}
+
 /** Write a file atomically so a crash cannot leave a half-written snapshot. */
 function writeAtomic(path, text) {
-  ensureRoot();
+  ensureCacheDir();
   const temporary = `${path}.tmp-${process.pid}`;
   writeFileSync(temporary, text, 'utf8');
   renameSync(temporary, path);
@@ -88,6 +112,10 @@ export function normalize(entry) {
       identifier: typeof pack.identifier === 'string' ? pack.identifier : '',
       version: typeof pack.version === 'string' ? pack.version : '',
       transport: (pack.transport && pack.transport.type) || 'stdio',
+      /** A private index this package must be fetched from, when the entry names one. */
+      registryBaseUrl: typeof pack.registryBaseUrl === 'string' ? pack.registryBaseUrl : '',
+      /** The runner the publisher had in mind (`npx`, `uvx`, `docker`), advisory only. */
+      runtimeHint: typeof pack.runtimeHint === 'string' ? pack.runtimeHint : '',
       environmentVariables: (Array.isArray(pack.environmentVariables) ? pack.environmentVariables : [])
         .map((variable) => ({
           name: typeof variable.name === 'string' ? variable.name : '',
@@ -97,9 +125,24 @@ export function normalize(entry) {
           default: typeof variable.default === 'string' ? variable.default : '',
         }))
         .filter((variable) => variable.name !== ''),
+      /** Arguments for the runner itself, e.g. npx's `-y` or `--package`. */
+      runtimeArguments: (Array.isArray(pack.runtimeArguments) ? pack.runtimeArguments : [])
+        .map((argument) => ({ value: typeof argument.value === 'string' ? argument.value : '' }))
+        .filter((argument) => argument.value !== ''),
+      /**
+       * Arguments for the server. A `named` entry without a value is a flag whose value the
+       * user must supply (`--out <dir>`), which becomes a form field rather than being lost.
+       */
       packageArguments: (Array.isArray(pack.packageArguments) ? pack.packageArguments : [])
-        .map((argument) => ({ value: argument.value, type: argument.type || 'positional' }))
-        .filter((argument) => typeof argument.value === 'string'),
+        .map((argument) => ({
+          type: typeof argument.type === 'string' ? argument.type : 'positional',
+          name: typeof argument.name === 'string' ? argument.name : '',
+          value: typeof argument.value === 'string' ? argument.value : '',
+          description: typeof argument.description === 'string' ? argument.description : '',
+          isRequired: argument.isRequired === true,
+          format: typeof argument.format === 'string' ? argument.format : '',
+        }))
+        .filter((argument) => argument.value !== '' || argument.name !== ''),
     }))
     .filter((pack) => pack.identifier !== '');
   const remotes = (Array.isArray(server.remotes) ? server.remotes : [])
@@ -183,8 +226,15 @@ export async function refreshCatalog() {
     }
     const servers = [...byName.values()].sort((left, right) =>
       String(right.publishedAt || '').localeCompare(String(left.publishedAt || '')));
+    // A short answer means an outage or a changed API, not an empty registry: keep the
+    // previous snapshot and say so, instead of overwriting good data with nothing.
+    if (servers.length < MIN_SNAPSHOT_ENTRIES) {
+      refresh.error = `the registry returned only ${servers.length} usable entries (expected at least ${MIN_SNAPSHOT_ENTRIES}); kept the previous snapshot`;
+      refresh.finishedAt = Date.now();
+      return refreshState();
+    }
     const fetchedAt = new Date().toISOString();
-    writeAtomic(CACHE_PATH, JSON.stringify({ fetchedAt, count: servers.length, servers }));
+    writeAtomic(CACHE_PATH, JSON.stringify({ cacheVersion: CACHE_VERSION, fetchedAt, count: servers.length, servers }));
     snapshot = { fetchedAt, servers };
     refresh.finishedAt = Date.now();
     return refreshState();
@@ -207,7 +257,10 @@ export function catalog() {
   if (snapshot === null && existsSync(CACHE_PATH)) {
     try {
       const parsed = JSON.parse(readFileSync(CACHE_PATH, 'utf8'));
-      if (Array.isArray(parsed.servers)) snapshot = { fetchedAt: parsed.fetchedAt || '', servers: parsed.servers };
+      // A cache from an older format is ignored, never half-read.
+      if (parsed.cacheVersion === CACHE_VERSION && Array.isArray(parsed.servers)) {
+        snapshot = { fetchedAt: parsed.fetchedAt || '', servers: parsed.servers };
+      }
     } catch {
       snapshot = null;
     }
@@ -222,6 +275,18 @@ export function catalog() {
     ageMs,
     source: snapshot.servers.length === 0 ? 'empty' : 'cache',
   };
+}
+
+/**
+ * Drop the in-memory snapshot so the next read comes from disk.
+ *
+ * The catalog is parsed once per process; tests (and any future "reload from disk" action)
+ * need a way to make the file authoritative again.
+ */
+export function resetCatalog() {
+  snapshot = null;
+  refresh.running = false;
+  refresh.error = '';
 }
 
 /** Score one server against a lower-cased query; `0` means no match. */
@@ -320,6 +385,39 @@ function locate(names, directories) {
   return '';
 }
 
+/** Every location a program occupies, PATH first and without duplicates. */
+function locateAll(names, directories) {
+  const pathEntries = String(process.env.PATH || '').split(delimiter).filter((entry) => entry !== '');
+  const found = [];
+  for (const root of [...pathEntries, ...directories]) {
+    for (const name of names) {
+      const candidate = join(root, name);
+      if (existsSync(candidate) && !found.includes(candidate)) found.push(candidate);
+    }
+  }
+  return found;
+}
+
+/** npm's own npx CLI beside one Node install — a Node without it cannot run npx packages. */
+function npxCliBeside(nodePath) {
+  if (nodePath === '') return '';
+  const sibling = join(nodePath, '..', 'node_modules', 'npm', 'bin', 'npx-cli.js');
+  return existsSync(sibling) ? sibling : '';
+}
+
+/**
+ * Whether a candidate is the Electron shell rather than Node.
+ *
+ * Inside DSH `process.execPath` is `electron.exe`; spawning it without
+ * `ELECTRON_RUN_AS_NODE=1` opens a window instead of running the script, so it is never a
+ * valid `command` for an MCP row. It is also not a Node install, so it is skipped here
+ * rather than "fixed" with an environment variable.
+ */
+function looksLikeElectron(candidate) {
+  const base = String(candidate).split(/[\\/]/).pop() || '';
+  return /electron/i.test(base);
+}
+
 /**
  * Detect the runtimes an install can use.
  *
@@ -339,33 +437,36 @@ export function detectRuntimes() {
     ? [join(home, '.local', 'bin'), join(process.env.LOCALAPPDATA || home, 'Programs', 'Python', 'Scripts'), join(process.env.USERPROFILE || home, '.cargo', 'bin')]
     : ['/usr/local/bin', '/usr/bin', join(home, '.local', 'bin'), join(home, '.cargo', 'bin')];
 
-  const nodePath = locate(platform === 'win32' ? ['node.exe', 'node'] : ['node'], nodeDirs);
+  const nodeNames = platform === 'win32' ? ['node.exe', 'node'] : ['node'];
+  const candidates = locateAll(nodeNames, nodeDirs).filter((candidate) => !looksLikeElectron(candidate));
+  // Pick the first Node that actually ships npm's npx CLI: DSH's bundled runtime has
+  // `node.exe` alone, and a row built on that Node would fail the moment npx is needed.
+  let nodePath = '';
+  let npxCliPath = '';
+  for (const candidate of candidates) {
+    const cli = npxCliBeside(candidate);
+    if (cli === '') continue;
+    nodePath = candidate;
+    npxCliPath = cli;
+    break;
+  }
+  const nodeWithoutNpm = nodePath === '' && candidates.length > 0 ? candidates[0] : '';
   const npxShim = locate(platform === 'win32' ? ['npx.cmd', 'npx'] : ['npx'], nodeDirs);
-  const npmCli = locate(platform === 'win32' ? ['npx-cli.js'] : [], []);
+  if (npxCliPath === '') npxCliPath = npxCliBeside(npxShim);
   const uvxPath = locate(platform === 'win32' ? ['uvx.exe', 'uvx'] : ['uvx'], pythonDirs);
   const dockerPath = locate(platform === 'win32' ? ['docker.exe', 'docker'] : ['docker'], nodeDirs);
 
-  // npm's npx-cli.js sits next to the node install, not on PATH.
-  let npxCliPath = npmCli;
-  if (npxCliPath === '' && nodePath !== '') {
-    const sibling = join(nodePath, '..', 'node_modules', 'npm', 'bin', 'npx-cli.js');
-    if (existsSync(sibling)) npxCliPath = sibling;
-  }
-  if (npxCliPath === '' && npxShim !== '') {
-    const sibling = join(npxShim, '..', 'node_modules', 'npm', 'bin', 'npx-cli.js');
-    if (existsSync(sibling)) npxCliPath = sibling;
-  }
-
+  // A `.cmd` shim can never be the command: the MCP SDK spawns with `shell: false`.
   const npxUsable = nodePath !== '' && npxCliPath !== '';
   return {
     platform,
-    node: { path: nodePath, available: nodePath !== '' },
+    node: { path: nodePath, available: nodePath !== '', withoutNpm: nodeWithoutNpm },
     npx: {
-      available: npxUsable || npxShim !== '',
+      available: npxUsable,
       shim: npxShim,
       cli: npxCliPath,
       // The exact executable plus leading args a stdio row must use.
-      command: npxUsable ? nodePath : npxShim,
+      command: npxUsable ? nodePath : '',
       prefix: npxUsable ? [npxCliPath] : [],
       direct: npxUsable,
     },
@@ -374,20 +475,72 @@ export function detectRuntimes() {
   };
 }
 
-/** The environment a generated stdio row should carry. */
+/**
+ * The environment a generated stdio row should carry.
+ *
+ * The MCP client hands stdio children a scrubbed copy of the parent environment that
+ * *keeps* `PATH`, so the runner is already reachable in the common case. Only when the
+ * Node this machine picked lives outside that inherited `PATH` is its directory added —
+ * and then only that one directory, never a copy of the whole parent `PATH`, which would
+ * bake one machine's layout into the profile.
+ */
 function baseEnv(runtimes) {
   const env = {};
   const nodeDir = runtimes.node.available ? join(runtimes.node.path, '..') : '';
-  const path = String(process.env.PATH || '');
-  if (nodeDir !== '') env.PATH = path === '' ? nodeDir : `${nodeDir}${delimiter}${path}`;
+  const path = String(process.env.PATH || '').toLowerCase();
+  if (nodeDir !== '' && !path.includes(nodeDir.toLowerCase())) env.PATH = nodeDir;
   return env;
 }
 
-/** Positional arguments of a package, in order. */
-function positionalArguments(pack) {
-  return pack.packageArguments
-    .filter((argument) => argument.type === 'positional' || argument.type === undefined)
-    .map((argument) => argument.value);
+/**
+ * The argv of one package, as literals plus the slots a user has to fill.
+ *
+ * The registry publishes two argument layers and both matter: `runtimeArguments` belong to
+ * the runner (`npx -y`, `npx --package`), `packageArguments` belong to the server. A *named*
+ * package argument with no value is a slot — dropping it would start a server that needs
+ * `--out <dir>` with the flag missing, and a missing `-y` would leave npx waiting on a
+ * prompt with no TTY attached.
+ *
+ * @param pack - one normalized package.
+ * @param runtime - `npm` or `pypi`.
+ * @param prefix - leading argv entries that launch the runner (`node.exe`, `npx-cli.js`).
+ * @returns `{argv, slots}` where `argv` entries are `{kind:'literal',value}` or
+ * `{kind:'slot',name,...}`.
+ */
+function argvFor(pack, runtime, prefix) {
+  const argv = prefix.map((value) => ({ kind: 'literal', value }));
+  // Defensive reads: a hand-edited or older cache may predate these fields entirely.
+  const runtimeArguments = (pack.runtimeArguments || []).map((argument) => argument.value);
+  for (const value of runtimeArguments) argv.push({ kind: 'literal', value });
+  if (runtime === 'npm' && !runtimeArguments.some((value) => value === '-y' || value === '--yes')) {
+    argv.push({ kind: 'literal', value: '-y' });
+  }
+  if ((pack.registryBaseUrl || '') !== '') {
+    // npm and uv spell a custom index differently; both must precede the package.
+    argv.push({ kind: 'literal', value: runtime === 'npm' ? `--registry=${pack.registryBaseUrl}` : '--index-url' });
+    if (runtime !== 'npm') argv.push({ kind: 'literal', value: pack.registryBaseUrl });
+  }
+  argv.push({ kind: 'literal', value: pack.identifier });
+  for (const argument of pack.packageArguments || []) {
+    if (argument.type === 'named') {
+      if (argument.name === '') continue;
+      if (argument.value !== '') {
+        argv.push({ kind: 'literal', value: argument.name });
+        argv.push({ kind: 'literal', value: argument.value });
+      } else {
+        argv.push({
+          kind: 'slot',
+          name: argument.name,
+          description: argument.description,
+          isRequired: argument.isRequired,
+          format: argument.format,
+        });
+      }
+      continue;
+    }
+    if (argument.value !== '') argv.push({ kind: 'literal', value: argument.value });
+  }
+  return argv;
 }
 
 /**
@@ -403,18 +556,22 @@ export function plansFor(server, runtimes) {
   for (const pack of server.packages) {
     if (pack.registryType === 'npm') {
       if (!runtimes.npx.available) {
-        blocked.push({ registryType: 'npm', identifier: pack.identifier, reason: '需要 Node.js（含 npm 的 npx）；未在 PATH 或常见安装位置找到' });
+        const found = runtimes.node.withoutNpm === '' ? '没有找到 Node.js' : `只找到 ${runtimes.node.withoutNpm}（不带 npm）`;
+        blocked.push({ registryType: 'npm', identifier: pack.identifier, reason: `需要带 npm 的 Node.js：${found}` });
         continue;
       }
+      const argv = argvFor(pack, 'npm', [...runtimes.npx.prefix]);
       options.push({
         kind: 'stdio',
         registryType: 'npm',
         label: `本地进程 · npx ${pack.identifier}`,
         transport: 'stdio',
         command: runtimes.npx.command,
-        args: [...runtimes.npx.prefix, '-y', pack.identifier, ...positionalArguments(pack)],
+        argv,
+        slots: argv.filter((entry) => entry.kind === 'slot'),
         env: baseEnv(runtimes),
-        variables: pack.environmentVariables,
+        variables: pack.environmentVariables || [],
+        runtimeHint: pack.runtimeHint,
         risk: '在你本机执行第三方命令',
       });
       continue;
@@ -424,15 +581,18 @@ export function plansFor(server, runtimes) {
         blocked.push({ registryType: 'pypi', identifier: pack.identifier, reason: '需要 uv（uvx）；未安装' });
         continue;
       }
+      const argv = argvFor(pack, 'pypi', []);
       options.push({
         kind: 'stdio',
         registryType: 'pypi',
         label: `本地进程 · uvx ${pack.identifier}`,
         transport: 'stdio',
         command: runtimes.uvx.path,
-        args: [pack.identifier, ...positionalArguments(pack)],
+        argv,
+        slots: argv.filter((entry) => entry.kind === 'slot'),
         env: baseEnv(runtimes),
-        variables: pack.environmentVariables,
+        variables: pack.environmentVariables || [],
+        runtimeHint: pack.runtimeHint,
         risk: '在你本机执行第三方命令',
       });
       continue;
@@ -445,7 +605,9 @@ export function plansFor(server, runtimes) {
   }
   for (const remote of server.remotes) {
     if (remote.type !== 'streamable-http') {
-      blocked.push({ registryType: 'remote', identifier: remote.url, reason: `暂不支持 ${remote.type} 远程传输` });
+      // Never mint a row for an endpoint this build cannot speak to: it would install
+      // cleanly and then fail on every connection.
+      blocked.push({ registryType: 'remote', identifier: remote.url, reason: `暂不支持 ${remote.type} 远程传输（二期）` });
       continue;
     }
     options.push({
@@ -454,14 +616,41 @@ export function plansFor(server, runtimes) {
       label: `远程连接 · ${remote.url}`,
       transport: 'streamable-http',
       url: remote.url,
+      argv: [],
+      slots: [],
       headers: {},
-      variables: remote.headers,
+      variables: remote.headers || [],
       risk: '请求发往第三方服务器；密钥会作为请求头发送',
     });
   }
   // A local process is the more capable install, so it leads when both exist.
   options.sort((left, right) => (left.kind === right.kind ? 0 : left.kind === 'stdio' ? -1 : 1));
   return { options, blocked };
+}
+
+/**
+ * Render one plan's argv, filling slots from user input.
+ *
+ * @param plan - a plan from {@link plansFor}.
+ * @param values - slot name to value.
+ * @returns `{args, missing}`: the argv strings, and the required slots left empty.
+ */
+export function resolveArgv(plan, values = {}) {
+  const args = [];
+  const missing = [];
+  for (const entry of plan.argv || []) {
+    if (entry.kind === 'literal') {
+      args.push(entry.value);
+      continue;
+    }
+    const value = values[entry.name];
+    if (typeof value !== 'string' || value === '') {
+      if (entry.isRequired) missing.push(entry.name);
+      continue;
+    }
+    args.push(entry.name, value);
+  }
+  return { args, missing };
 }
 
 /** A filesystem- and package-name-safe slug that stays unique per registry name. */
@@ -497,7 +686,7 @@ function yamlString(value) {
 }
 
 /** Render the generated bundle's patch: one `dsh-mcp-client` row. */
-export function renderPatch({ rowId, serverName, plan, config }) {
+export function renderPatch({ rowId, serverName, plan, args, config }) {
   const lines = [
     '# Generated by dsh-plugin-mcp-manager from the official MCP registry.',
     '# Edit the row through the plugin UI; a manual edit here is overwritten on reinstall.',
@@ -511,8 +700,8 @@ export function renderPatch({ rowId, serverName, plan, config }) {
   if (plan.transport === 'stdio') {
     lines.push(`        command: ${yamlString(plan.command)}`);
     lines.push('        args:');
-    for (const argument of plan.args) lines.push(`          - ${yamlString(argument)}`);
-    if (plan.args.length === 0) lines.push('          []');
+    for (const argument of args || []) lines.push(`          - ${yamlString(argument)}`);
+    if ((args || []).length === 0) lines.push('          []');
     const env = { ...plan.env, ...config };
     const keys = Object.keys(env);
     lines.push('        env:');
@@ -584,16 +773,17 @@ export function manifestFor(slug) {
 /**
  * Write (or rewrite) one generated bundle.
  *
- * @returns `{slug, dir, pkg}`.
+ * @param options - `{slug, server, serverName, plan, args, config, argumentKeys}`.
+ * @returns `{slug, dir, pkg, rowId}`.
  */
-export function writeBundle({ slug, server, serverName, plan, config }) {
+export function writeBundle({ slug, server, serverName, plan, args, config, argumentValues }) {
   const dir = bundleDir(slug);
   ensureRoot();
   mkdirSync(dir, { recursive: true });
   const pkg = `${BUNDLE_PREFIX}${slug}`;
-  const rowId = `mcp-${slug}`;
+  const rowId = `${ROW_PREFIX}${slug}`;
   writeFileSync(join(dir, 'package.json'), renderPackageJson(slug, server.version, `${server.title} — installed from the official MCP registry`), 'utf8');
-  writeFileSync(join(dir, 'cordis.patch.yml'), renderPatch({ rowId, serverName, plan, config }), 'utf8');
+  writeFileSync(join(dir, 'cordis.patch.yml'), renderPatch({ rowId, serverName, plan, args, config }), 'utf8');
   const envKeys = Object.keys(config);
   writeFileSync(join(dir, 'market.meta.json'), `${JSON.stringify({
     registryName: server.name,
@@ -609,11 +799,12 @@ export function writeBundle({ slug, server, serverName, plan, config }) {
     registryType: plan.registryType,
     transport: plan.transport,
     command: plan.kind === 'stdio' ? plan.command : null,
-    args: plan.kind === 'stdio' ? plan.args : null,
+    args: plan.kind === 'stdio' ? args || [] : null,
+    argumentValues: argumentValues || {},
     url: plan.kind === 'http' ? plan.url : null,
     configKeys: envKeys,
   }, null, 2)}\n`, 'utf8');
-  return { slug, dir, pkg };
+  return { slug, dir, pkg, rowId };
 }
 
 /** Delete one generated bundle directory. */

@@ -93,16 +93,41 @@ package.json
 
 | registry 字段 | 生成 |
 | --- | --- |
-| `packages[].registryType === 'npm'` | stdio 行：`<node.exe> <npm>/bin/npx-cli.js -y <identifier> [packageArguments]` |
-| `packages[].registryType === 'pypi'` | stdio 行：`uvx <identifier>`（本机没装 uv 时标记为不可用并说明原因） |
+| `packages[].registryType === 'npm'` | stdio 行：`<node.exe> <npm>/bin/npx-cli.js …` |
+| `packages[].registryType === 'pypi'` | stdio 行：`uvx …`（本机没装 uv 时标记为不可用并说明原因） |
 | `packages[].registryType === 'oci'` | 标记「容器方式二期支持」 |
-| 只有 `remotes[]` | http 行：`transport: streamable-http` + `url`（`sse` 暂不支持） |
+| 只有 `remotes[]` | http 行：`transport: streamable-http` + `url`（**`sse` 明确标记「暂不支持」，绝不生成注定连不上的行**） |
+| `packages[].runtimeArguments[]` | **跑运行器自己的参数**（`npx -y`、`npx --package`），排在包名之前；registry 已给 `-y` 时不重复添加 |
+| `packages[].packageArguments[]`（`positional` / 带值的 `named`） | 追加在包名之后 |
+| `packages[].packageArguments[]`（**不带值的 `named`**，如 `--out <dir>`） | **命令参数表单**：安装框里多一个字段，填了才拼进 argv；`isRequired` 的留空则拒绝安装（不是静默丢掉） |
+| `packages[].registryBaseUrl` | npm 加 `--registry=<url>`、uv 加 `--index-url <url>`（私有 registry 条目） |
+| `packages[].runtimeHint` | 仅作展示提示，实际运行器仍按 `registryType` + 本机能力决定 |
 | `packages[].environmentVariables[]` | 安装表单的 schema（`name`/`description`/`isRequired`/`isSecret`/默认值），填完写进行 `env` |
 | `remotes[].headers[]` | http 行的 `headers`（同上） |
 
 **为什么 npm 包不用 `command: npx`**：MCP SDK 的 `StdioClientTransport` 用 **`shell: false`** 起进程，
 而 Windows 上 `npx` 是 `.cmd` 垫片 —— 无 shell 直接执行 `.cmd` 会被 Node 拒绝，所以一律用
-`node.exe + npm/bin/npx-cli.js`（不依赖 PATH，也不经 cmd 引号地狱）。实测 `npx --version` → 11.19.0。
+`node.exe + npm/bin/npx-cli.js`。实测 `npx --version` → 11.19.0。
+
+### 生成的命令是**本机解析**的，这是设计而非缺陷
+
+装一个 npm 条目后，生成的 `cordis.patch.yml` 里是一条**绝对路径**，例如（本机实测）：
+
+```yaml
+command: "C:\\Program Files\\nodejs\\node.exe"
+args:
+  - "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npx-cli.js"
+  - "-y"
+  - "pretrip-mcp"
+```
+
+- **不是** `process.execPath`：DSH 里那是 `electron.exe`，spawn 它（不带 `ELECTRON_RUN_AS_NODE=1`）会**弹出新窗口而不是跑脚本**。
+  探测时按文件名排除 `electron*`，并且**只接受自带 npm 的 Node**——DSH 自带运行时只有 `node.exe`（没有 npm），
+  拿它拼 npx 命令装完必挂，所以宁可不选。
+- **不依赖 PATH**：命令是绝对路径；`scrubbedParentEnv()` 本来就保留 `PATH`，所以只有当挑中的 Node 不在继承来的 PATH 里时，
+  才把**那一个目录**写进 `env.PATH`（早期版本把整条父 PATH 写进配置，会把一台机器的目录布局烙进 profile，已改）。
+- **本机没有 Node 时**：不生成行，而是明确回「需要带 npm 的 Node.js：没有找到 Node.js / 只找到 …（不带 npm）」。
+- **代价**：这条行是**给装它的那台机器**的；把 profile 原样拷到另一台机器，路径可能失效（那台机器重装一次即可）。
 
 三条实现约束（都是踩过的）：
 
@@ -187,10 +212,25 @@ https://github.com/hd25071/dsh-plugin-mcp-manager
 ## 状态与验证
 
 **已在真实 DSH 里跑起来**（2026-10-09）：插件作为组合包装进 profile，web boot 干净、卡片显示「运行中」。
-自动化检查：`npm test` **24 个用例全过**（客户端激活契约 7 + 深渲染冒烟 4 + 市场核心 7 + 市场路由 6），
-两个半侧 `node --check` 通过，仓库无任何个人/环境内容。测试抓出并修掉了三个真 bug：
+自动化检查：`npm test` **34 个用例全过**（客户端激活契约 7 + 深渲染冒烟 5 + 市场核心 12 + 市场路由 10），
+两个半侧 `node --check` 通过，仓库无任何个人/环境内容。测试逼出来的真 bug 已有四个：
 `metaOf` 引用了不存在的常量（刷新目录必崩）、**POST 响应体被 cancel 掉**（保存配置只报 `HTTP 200`）、
-`Panel` 里 `note` 状态漏声明（管理器卡片一渲染就抛错）。已知不确定点：
+`Panel` 里 `note` 状态漏声明（管理器卡片一渲染就抛错）、生成的行把整条父 `PATH` 写进配置。
+一轮代码审查后又补了这些（每条都有对应用例）：
+
+| 审查项 | 处理 |
+| --- | --- |
+| 命令路径从哪来 | 排除 `electron*`；只接受自带 npm 的 Node；无 Node 时明确拒绝而不是生成坏行；用例断言命令是绝对路径的 node 可执行文件 |
+| 参数映射不全 | 补 `runtimeArguments`（含去重 `-y`）、`named` 参数槽位（必填留空即拒绝）、`registryBaseUrl`、`runtimeHint` |
+| SSE-only 条目 | 明确标记「暂不支持 sse 远程传输（二期）」，`options` 为空、安装返回 409，**不生成行** |
+| 缓存非原子/坏数据 | 临时文件 + rename；**条目数 < 1000 视为失败拉取**，保留旧快照并报错；缓存带 `cacheVersion`，格式不符即忽略 |
+| 覆盖更新丢配置 | 重装时从当前行读回 `env`/`headers` 合并，只覆盖用户新填的；已配置项在表单里标注「留空则保留原值」 |
+| 不可信文本渲染 | 全部走 React 文本子节点；用例扫描 `innerHTML`/`dangerouslySetInnerHTML`/`new Image(`/`iconUrl` 等一律不得出现 |
+| 行名冲突 | 行 id 为 `mcp-<slug>`（slug 带名字哈希），`serverName` 在安装时对本 profile 已有名字去重 |
+| 版本对比语义 | 只做「不等 → 提示」，不做新旧判断；UI 文案为「目录版本 vX（不同）」 |
+| 缓存位置 | 快照移到 `~/.dsh/mcp-market/`，**不在** `~/.dsh/mcp-servers/`（后者是未来 `hmr.root` 的候选，3.3 MB 缓存重写会触发 HMR） |
+
+已知不确定点：
 
 - **工具数**依赖 `ctx.get('tools')` 上是否存在可读的工具集合；`dsh-tools` 只公开 `register/restrict/guard`，
   没有列表接口，所以本插件用防御式探测，读不到就显示「工具数未知」而不是编一个数。

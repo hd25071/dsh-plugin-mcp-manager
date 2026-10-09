@@ -85,10 +85,10 @@ window.__ModuleLoader__.load({
     };
     const marketDetail = (name) => call(MARKET_DETAIL_ROUTE + '?name=' + encodeURIComponent(name));
     const marketRefresh = () => call(MARKET_REFRESH_ROUTE, { method: 'POST' });
-    const marketInstall = (name, optionIndex, config) => call(MARKET_INSTALL_ROUTE, {
+    const marketInstall = (name, optionIndex, config, args) => call(MARKET_INSTALL_ROUTE, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name, optionIndex, config }),
+      body: JSON.stringify({ name, optionIndex, config, arguments: args || {} }),
     });
     const marketUninstall = (slug) => call(MARKET_UNINSTALL_ROUTE, {
       method: 'POST',
@@ -425,12 +425,27 @@ window.__ModuleLoader__.load({
       return Math.floor(hours / 24) + ' 天前';
     }
 
+    /** The argv of one plan, with unfilled argument slots shown as placeholders. */
+    function argvOf(option, argumentValues) {
+      const parts = [];
+      for (const entry of option.argv || []) {
+        if (entry.kind === 'literal') {
+          parts.push(entry.value);
+          continue;
+        }
+        const value = (argumentValues || {})[entry.name];
+        parts.push(entry.name);
+        parts.push(typeof value === 'string' && value !== '' ? value : '<需要填写>');
+      }
+      return parts;
+    }
+
     /** One plan's command line or URL, as the confirmation dialog must show it verbatim. */
-    function commandLineOf(option) {
+    function commandLineOf(option, argumentValues) {
       if (!option) return '';
       if (option.kind === 'http') return option.url;
       const quote = (part) => (/\s/.test(part) ? '"' + part + '"' : part);
-      return [option.command, ...(option.args || [])].map(quote).join(' ');
+      return [option.command, ...argvOf(option, argumentValues)].map(quote).join(' ');
     }
 
     /**
@@ -445,6 +460,7 @@ window.__ModuleLoader__.load({
       const [detail, setDetail] = React.useState(null);
       const [optionIndex, setOptionIndex] = React.useState(0);
       const [values, setValues] = React.useState({});
+      const [argValues, setArgValues] = React.useState({});
       const [busy, setBusy] = React.useState(false);
       const [error, setError] = React.useState('');
       const [result, setResult] = React.useState(null);
@@ -463,6 +479,8 @@ window.__ModuleLoader__.load({
               }
             }
             setValues(initial);
+            // A reinstall remembers the argument values it was given last time.
+            setArgValues((value.installed && value.installed.argumentValues) || {});
           } catch (e) {
             if (live) setError(String((e && e.message) || e));
           }
@@ -475,7 +493,7 @@ window.__ModuleLoader__.load({
         setBusy(true);
         setError('');
         try {
-          const value = await marketInstall(name, optionIndex, values);
+          const value = await marketInstall(name, optionIndex, values, argValues);
           setResult(value);
           if (onDone) onDone();
         } catch (e) {
@@ -520,7 +538,7 @@ window.__ModuleLoader__.load({
         error ? h('div', { style: S.err }, error) : null,
 
         detail && detail.options.length === 0
-          ? h('div', { style: S.err }, '这台机器没有能跑它的运行时：',
+          ? h('div', { style: S.err }, '这个条目在这台机器上没有可用的安装方式：',
               (detail.blocked || []).map((item) => item.registryType + '（' + item.reason + '）').join('；'))
           : null,
 
@@ -544,8 +562,28 @@ window.__ModuleLoader__.load({
         option
           ? h('div', { style: { marginTop: 10 } },
               h('div', { style: S.label }, option.kind === 'http' ? '将连接到的地址' : '将执行的命令'),
-              h('pre', { style: S.pre }, commandLineOf(option)),
+              h('pre', { style: S.pre }, commandLineOf(option, argValues)),
               h('div', { style: { ...S.muted, marginTop: 4 } }, '⚠️ ' + option.risk),
+            )
+          : null,
+
+        option && (option.slots || []).length > 0
+          ? h('div', { style: { marginTop: 10 } },
+              h('div', { style: S.label }, '命令参数'),
+              (option.slots || []).map((slot) => h('div', { key: slot.name, style: S.field },
+                h('label', { style: { ...S.label, ...S.mono } },
+                  slot.name,
+                  slot.isRequired ? h('span', { style: S.err }, ' *') : null),
+                h('input', {
+                  style: S.input,
+                  type: 'text',
+                  placeholder: slot.format || (slot.isRequired ? '必填' : '可留空'),
+                  value: argValues[slot.name] === undefined ? '' : argValues[slot.name],
+                  onChange: (event) => setArgValues((current) => ({ ...current, [slot.name]: event.target.value })),
+                }),
+              )),
+              h('div', { style: { ...S.muted, marginTop: 4 } },
+                '这个 server 要求命令行参数（如目录路径）；留空则不带该参数。'),
             )
           : null,
 
@@ -565,11 +603,14 @@ window.__ModuleLoader__.load({
                 }),
               )),
               h('div', { style: { ...S.muted, marginTop: 4 } },
-                '这些值会写进 profile 的 cordis.patch.yml（明文）。'),
+                '这些值会写进 profile 的 cordis.patch.yml（明文）。',
+                detail && detail.installed && (detail.installed.configKeys || []).length > 0
+                  ? '已配置 ' + detail.installed.configKeys.join('、') + '，留空则保留原值。'
+                  : ''),
             )
           : null,
 
-        option && option.variables.length === 0
+        option && option.variables.length === 0 && (option.slots || []).length === 0
           ? h('div', { style: { ...S.muted, marginTop: 10 } }, '这个条目不需要填写任何配置。')
           : null,
 
@@ -750,7 +791,7 @@ window.__ModuleLoader__.load({
                         ? h('span', { style: { ...S.tag, ...S.muted } }, '工具数未知')
                         : null),
                   item.updateAvailable
-                    ? h('span', { style: { ...S.tag, ...S.muted } }, '有新版 v' + item.latestVersion)
+                    ? h('span', { style: { ...S.tag, ...S.muted } }, '目录版本 v' + item.latestVersion + '（不同）')
                     : null,
                   h('span', { style: { flex: 1 } }),
                   h('button', {

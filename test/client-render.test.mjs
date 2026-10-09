@@ -6,6 +6,7 @@
 // here instead of blanking the Plugins page in a live app.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 let captured = null;
 globalThis.window = { __ModuleLoader__: { load(spec) { captured = spec; } } };
@@ -111,4 +112,14 @@ test('the call-log pane renders its session picker', () => {
 test('the tab title component renders a label', () => {
   const title = componentFor('sidebar.right.pane.tab.title');
   assert.equal(typeof title, 'function');
+});
+
+test('no HTML injection path exists in the browser half', () => {
+  // Every string on this page comes from the internet (registry titles, descriptions).
+  // React renders them as text children only; this guard keeps it that way.
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8');
+  for (const pattern of [/innerHTML/, /outerHTML/, /dangerouslySetInnerHTML/, /insertAdjacentHTML/, /document\.write/, /new Image\(/, /icon_url|iconUrl/]) {
+    assert.doesNotMatch(source, pattern, String(pattern) + ' must not appear in the browser half');
+  }
+  assert.doesNotMatch(source, /<script|javascript:/, 'no raw markup or script URLs');
 });

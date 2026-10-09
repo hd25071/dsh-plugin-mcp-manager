@@ -6,7 +6,7 @@ import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 const home = mkdtempSync(join(tmpdir(), 'mcp-routes-'));
 process.env.USERPROFILE = home;
@@ -19,12 +19,15 @@ const market = await import('../market.js');
 // they say instead of depending on the order the tests ran in.
 beforeEach(() => {
   rmSync(market.MARKET_ROOT, { recursive: true, force: true });
+  rmSync(market.CACHE_DIR, { recursive: true, force: true });
+  market.resetCatalog();
 });
 
 /** A cache with two entries: one npm, one remote-only. */
 function seedCache() {
-  mkdirSync(market.MARKET_ROOT, { recursive: true });
+  mkdirSync(dirname(market.CACHE_PATH), { recursive: true });
   writeFileSync(market.CACHE_PATH, JSON.stringify({
+    cacheVersion: market.CACHE_VERSION,
     fetchedAt: new Date().toISOString(),
     count: 2,
     servers: [
@@ -41,6 +44,21 @@ function seedCache() {
         name: 'vendor.example/mcp', title: 'Vendor HTTP', description: 'remote only', version: '1.0.0',
         publishedAt: '2026-01-01T00:00:00Z', packages: [],
         remotes: [{ type: 'streamable-http', url: 'https://vendor.example/mcp', headers: [] }],
+      },
+      {
+        name: 'vendor.example/tree', title: 'Vendor Tree', description: 'needs a directory', version: '1.0.0',
+        publishedAt: '2026-03-03T00:00:00Z', remotes: [],
+        packages: [{
+          registryType: 'npm', identifier: '@example/tree', version: '1.0.0', transport: 'stdio',
+          registryBaseUrl: '', runtimeHint: '', environmentVariables: [],
+          runtimeArguments: [{ value: '-y' }],
+          packageArguments: [{ type: 'named', name: '--out', value: '', description: 'output root', isRequired: true, format: 'filepath' }],
+        }],
+      },
+      {
+        name: 'vendor.example/legacy-sse', title: 'Vendor SSE', description: 'sse only', version: '1.0.0',
+        publishedAt: '2026-04-04T00:00:00Z', packages: [],
+        remotes: [{ type: 'sse', url: 'https://vendor.example/sse', headers: [] }],
       },
     ],
   }));
@@ -90,7 +108,7 @@ test('status, search and detail answer from the cached snapshot', async () => {
 
   const status = await call(routes, host.MARKET_PATH, host.MARKET_PATH);
   assert.equal(status.status, 200);
-  assert.equal(status.body.value.count, 2);
+  assert.equal(status.body.value.count, 4);
   assert.equal(status.body.value.source, 'cache');
 
   const search = await call(routes, host.MARKET_SEARCH_PATH, host.MARKET_SEARCH_PATH + '?q=notes');
@@ -174,4 +192,102 @@ test('without the plugin manager the install routes degrade instead of throwing'
   const refused = await call(routes, host.MARKET_INSTALL_PATH, host.MARKET_INSTALL_PATH, post({ name: 'vendor.example/notes' }));
   assert.equal(refused.status, 503);
   assert.equal(refused.body.error.code, 'service-unavailable');
+});
+
+test('a reinstall keeps the configuration the row already carries', async () => {
+  seedCache();
+  const routes = new Map();
+  const slug = market.slugFor('vendor.example/notes');
+  // The editor reports the generated row with the values a user typed last time.
+  const ctx = {
+    get(key) {
+      if (key === 'connection') return { fetch: { register(spec) { routes.set(spec.path, spec); } } };
+      if (key === 'pluginManager') {
+        return { async installBundle() { return { exitCode: 0 }; }, async removeBundle() { return { exitCode: 0 }; } };
+      }
+      if (key === 'configEditor') {
+        return {
+          configuration() {
+            return [{
+              entry: { options: { id: 'mcp-' + slug, name: '@deepseek-ai/dsh-mcp-client' } },
+              inherited: {},
+              override: { transport: 'stdio', serverName: 'notes', command: 'node', args: [], env: { EXAMPLE_API_KEY: 'first-secret' } },
+            }];
+          },
+        };
+      }
+      return undefined;
+    },
+  };
+  host.apply(ctx);
+
+  const first = await call(routes, host.MARKET_INSTALL_PATH, host.MARKET_INSTALL_PATH,
+    post({ name: 'vendor.example/notes', config: { EXAMPLE_API_KEY: 'first-secret' } }));
+  assert.equal(first.status, 200);
+
+  const again = await call(routes, host.MARKET_INSTALL_PATH, host.MARKET_INSTALL_PATH,
+    post({ name: 'vendor.example/notes', config: {} }));
+  assert.equal(again.body.value.reinstalled, true);
+  assert.deepEqual(again.body.value.keptConfigKeys, ['EXAMPLE_API_KEY']);
+  const kept = readFileSync(join(again.body.value.dir, 'cordis.patch.yml'), 'utf8');
+  assert.match(kept, /EXAMPLE_API_KEY: "first-secret"/, 'a reinstall must not wipe the stored secret');
+
+  const replaced = await call(routes, host.MARKET_INSTALL_PATH, host.MARKET_INSTALL_PATH,
+    post({ name: 'vendor.example/notes', config: { EXAMPLE_API_KEY: 'second-secret' } }));
+  const after = readFileSync(join(replaced.body.value.dir, 'cordis.patch.yml'), 'utf8');
+  assert.match(after, /EXAMPLE_API_KEY: "second-secret"/, 'a supplied value replaces the stored one');
+});
+
+test('a required command argument left empty is refused before anything is written', async () => {
+  seedCache();
+  const { routes, calls } = makeCtx();
+  const refused = await call(routes, host.MARKET_INSTALL_PATH, host.MARKET_INSTALL_PATH,
+    post({ name: 'vendor.example/tree', config: {} }));
+  assert.equal(refused.status, 400);
+  assert.equal(refused.body.error.code, 'missing-arguments');
+  assert.equal(calls.install.length, 0);
+
+  // Filling it installs, and the flag reaches the generated argv.
+  const filled = await call(routes, host.MARKET_INSTALL_PATH, host.MARKET_INSTALL_PATH,
+    post({ name: 'vendor.example/tree', config: {}, arguments: { '--out': 'D:\\out' } }));
+  assert.equal(filled.status, 200);
+  const patch = readFileSync(join(filled.body.value.dir, 'cordis.patch.yml'), 'utf8');
+  assert.match(patch, /- "--out"/);
+  assert.match(patch, /- "D:\\\\out"/);
+});
+
+test('an SSE-only entry is refused with a reason instead of minting a dead row', async () => {
+  seedCache();
+  const { routes, calls } = makeCtx();
+  const detail = await call(routes, host.MARKET_DETAIL_PATH, host.MARKET_DETAIL_PATH + '?name=' + encodeURIComponent('vendor.example/legacy-sse'));
+  assert.equal(detail.body.value.options.length, 0, 'no plan may be offered for an unsupported transport');
+  assert.match(JSON.stringify(detail.body.value.blocked), /sse/);
+
+  const refused = await call(routes, host.MARKET_INSTALL_PATH, host.MARKET_INSTALL_PATH,
+    post({ name: 'vendor.example/legacy-sse' }));
+  assert.equal(refused.status, 409);
+  assert.equal(refused.body.error.code, 'no-install-option');
+  assert.equal(calls.install.length, 0);
+});
+
+test('the installed list compares versions by inequality only', async () => {
+  seedCache();
+  const { routes } = makeCtx();
+  const installed = await call(routes, host.MARKET_INSTALL_PATH, host.MARKET_INSTALL_PATH,
+    post({ name: 'vendor.example/notes', config: { EXAMPLE_API_KEY: 'k' } }));
+  assert.equal(installed.status, 200);
+
+  const same = await call(routes, host.MARKET_INSTALLED_PATH, host.MARKET_INSTALLED_PATH);
+  assert.equal(same.body.value.items[0].updateAvailable, false, 'the same version is not an update');
+
+  // The registry moves on: any difference is reported, with no ordering claim.
+  const cache = JSON.parse(readFileSync(market.CACHE_PATH, 'utf8'));
+  cache.servers = cache.servers.map((server) => (server.name === 'vendor.example/notes' ? { ...server, version: '9.9.9' } : server));
+  writeFileSync(market.CACHE_PATH, JSON.stringify(cache));
+  market.resetCatalog();
+
+  const moved = await call(routes, host.MARKET_INSTALLED_PATH, host.MARKET_INSTALLED_PATH);
+  assert.equal(moved.body.value.items[0].updateAvailable, true);
+  assert.equal(moved.body.value.items[0].latestVersion, '9.9.9');
+  assert.equal(moved.body.value.items[0].registryVersion, '6.3.0', 'the installed version stays the recorded one');
 });

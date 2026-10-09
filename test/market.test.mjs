@@ -47,6 +47,7 @@ test('normalize keeps the fields an install needs', () => {
 
 test('search ranks a name match above a description match and filters by kind', () => {
   const cache = {
+    cacheVersion: market.CACHE_VERSION,
     fetchedAt: new Date().toISOString(),
     count: 3,
     servers: [
@@ -56,8 +57,9 @@ test('search ranks a name match above a description match and filters by kind', 
     ],
   };
   cache.servers[2].description = 'a filesystem helper over http';
-  mkdirSync(market.MARKET_ROOT, { recursive: true });
+  mkdirSync(market.CACHE_DIR, { recursive: true });
   writeFileSync(market.CACHE_PATH, JSON.stringify(cache));
+  market.resetCatalog();
 
   const all = market.searchCatalog('filesystem', {});
   assert.equal(all.total, 2);
@@ -68,6 +70,13 @@ test('search ranks a name match above a description match and filters by kind', 
   assert.equal(market.searchCatalog('nothing-matches-this', {}).total, 0);
 });
 
+test('a cache written by another format version is ignored, not half-read', () => {
+  mkdirSync(market.CACHE_DIR, { recursive: true });
+  writeFileSync(market.CACHE_PATH, JSON.stringify({ fetchedAt: new Date().toISOString(), servers: [{ name: 'x/y' }] }));
+  market.resetCatalog();
+  assert.equal(market.catalog().source, 'none', 'a cache without cacheVersion must be discarded');
+});
+
 test('plans: npm needs Node, pypi needs uv, remote-only becomes http, oci is deferred', () => {
   const server = market.normalize(entry('x/multi', {
     packages: [
@@ -76,23 +85,110 @@ test('plans: npm needs Node, pypi needs uv, remote-only becomes http, oci is def
       { registryType: 'pypi', identifier: 'x-mcp', transport: { type: 'stdio' } },
     ],
   }));
-  const withNode = market.plansFor(server, { platform: 'win32', node: { path: 'C:\\node\\node.exe', available: true }, npx: { available: true, command: 'C:\\node\\node.exe', prefix: ['C:\\npm\\npx-cli.js'] }, uvx: { available: false }, docker: { available: true } });
+  const withNode = market.plansFor(server, { platform: 'win32', node: { path: 'C:\\node\\node.exe', available: true, withoutNpm: '' }, npx: { available: true, command: 'C:\\node\\node.exe', prefix: ['C:\\npm\\npx-cli.js'] }, uvx: { available: false }, docker: { available: true } });
   assert.equal(withNode.options.length, 1, 'only the npm package is runnable here');
   assert.equal(withNode.options[0].kind, 'stdio');
   assert.equal(withNode.options[0].command, 'C:\\node\\node.exe');
-  assert.deepEqual(withNode.options[0].args.slice(0, 2), ['C:\\npm\\npx-cli.js', '-y']);
+  assert.deepEqual(market.resolveArgv(withNode.options[0]).args.slice(0, 2), ['C:\\npm\\npx-cli.js', '-y']);
   assert.equal(withNode.blocked.some((item) => item.registryType === 'pypi'), true);
   assert.equal(withNode.blocked.some((item) => item.registryType === 'oci'), true);
 
-  const withUv = market.plansFor(server, { platform: 'linux', node: { path: '', available: false }, npx: { available: false }, uvx: { available: true, path: '/usr/bin/uvx' }, docker: { available: false } });
+  const withUv = market.plansFor(server, { platform: 'linux', node: { path: '', available: false, withoutNpm: '' }, npx: { available: false }, uvx: { available: true, path: '/usr/bin/uvx' }, docker: { available: false } });
   assert.equal(withUv.options.length, 1);
   assert.equal(withUv.options[0].command, '/usr/bin/uvx');
 
   const remoteOnly = market.normalize(entry('x/http', { remotes: [{ type: 'streamable-http', url: 'https://x.test/mcp' }] }));
-  const remotePlan = market.plansFor(remoteOnly, { platform: 'win32', node: { path: '', available: false }, npx: { available: false }, uvx: { available: false }, docker: { available: false } });
+  const remotePlan = market.plansFor(remoteOnly, { platform: 'win32', node: { path: '', available: false, withoutNpm: '' }, npx: { available: false }, uvx: { available: false }, docker: { available: false } });
   assert.equal(remotePlan.options.length, 1);
   assert.equal(remotePlan.options[0].kind, 'http');
   assert.equal(remotePlan.options[0].transport, 'streamable-http');
+});
+
+test('the generated command is a real Node install, never the Electron shell', () => {
+  const server = market.normalize(entry('x/npm', { packages: [npmPackage('x-mcp')] }));
+  const runtimes = market.detectRuntimes();
+  if (runtimes.npx.available) {
+    const plan = market.plansFor(server, runtimes).options[0];
+    assert.match(plan.command, /(^[A-Za-z]:[\\/]|\/)/, 'the command must be an absolute path, not a PATH lookup');
+    assert.match(plan.command.split(/[\\/]/).pop(), /^node(\.exe)?$/i, 'the command must be a node executable');
+    assert.doesNotMatch(plan.command, /electron/i, 'the Electron shell is never a valid command');
+    assert.match(runtimes.npx.cli, /npx-cli\.js$/, 'npx must run through npm\'s own CLI');
+    assert.doesNotMatch(runtimes.npx.cli, /electron/i);
+  } else {
+    // A machine with no usable Node must say so rather than mint a broken row.
+    const { options, blocked } = market.plansFor(server, runtimes);
+    assert.equal(options.length, 0);
+    assert.match(blocked[0].reason, /Node/);
+  }
+  // A Node without npm is explicitly not enough.
+  const noNpm = market.plansFor(server, { platform: 'win32', node: { path: 'C:\\dsh\\node.exe', available: true, withoutNpm: 'C:\\dsh\\node.exe' }, npx: { available: false, command: '', prefix: [] }, uvx: { available: false }, docker: { available: false } });
+  assert.equal(noNpm.options.length, 0);
+  assert.match(noNpm.blocked[0].reason, /npm/);
+});
+
+test('both argument layers reach the argv, and a valueless named flag becomes a slot', () => {
+  const pack = {
+    registryType: 'npm', identifier: '@aquex/stage1', version: '1.0.0', transport: 'stdio',
+    registryBaseUrl: '', runtimeHint: 'npx',
+    environmentVariables: [],
+    runtimeArguments: [{ value: '-y' }, { value: '--package' }],
+    packageArguments: [
+      { type: 'positional', name: '', value: 'stage1-mcp', description: '', isRequired: false, format: '' },
+      { type: 'named', name: '--out', value: '', description: 'Absolute writable output root', isRequired: true, format: 'filepath' },
+    ],
+  };
+  const server = market.normalize(entry('ai.aquex/stage1', { packages: [pack] }));
+  const plan = market.plansFor(server, market.detectRuntimes()).options[0];
+
+  const filled = market.resolveArgv(plan, { '--out': 'D:\\out' });
+  // The trailing entries are the registry's own argv; the leading ones launch the runner.
+  assert.deepEqual(filled.args.slice(-6), ['-y', '--package', '@aquex/stage1', 'stage1-mcp', '--out', 'D:\\out']);
+  assert.deepEqual(filled.missing, []);
+  assert.equal(filled.args.filter((value) => value === '-y').length, 1, 'the registry -y must not be doubled');
+
+  const empty = market.resolveArgv(plan, {});
+  assert.deepEqual(empty.missing, ['--out'], 'a required named flag must be reported, not silently dropped');
+
+  // A registry-provided value is used verbatim instead of becoming a slot.
+  const fixed = market.normalize(entry('x/fixed', { packages: [{ ...pack, packageArguments: [{ type: 'named', name: '--mode', value: 'fast', description: '', isRequired: false, format: '' }] }] }));
+  const fixedPlan = market.plansFor(fixed, market.detectRuntimes()).options[0];
+  assert.equal(fixedPlan.slots.length, 0);
+  assert.equal(market.resolveArgv(fixedPlan).args.includes('fast'), true);
+});
+
+test('a custom registry base url is passed to the runner', () => {
+  const server = market.normalize(entry('x/private', { packages: [{ ...npmPackage('x-private'), registryBaseUrl: 'https://npm.corp.test/' }] }));
+  const plan = market.plansFor(server, market.detectRuntimes()).options[0];
+  assert.equal(market.resolveArgv(plan).args.includes('--registry=https://npm.corp.test/'), true);
+});
+
+test('a short pull keeps the previous snapshot instead of blanking the market', async () => {
+  mkdirSync(market.CACHE_DIR, { recursive: true });
+  const good = {
+    cacheVersion: market.CACHE_VERSION,
+    fetchedAt: new Date().toISOString(),
+    count: 2,
+    servers: [market.normalize(entry('a/keep')), market.normalize(entry('b/keep'))],
+  };
+  writeFileSync(market.CACHE_PATH, JSON.stringify(good));
+  market.resetCatalog();
+  assert.equal(market.catalog().count, 2);
+
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    async json() {
+      return { servers: [entry('only/one')], metadata: {} };
+    },
+  });
+  try {
+    const state = await market.refreshCatalog();
+    assert.match(state.error, /only 1 usable entries/);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  market.resetCatalog();
+  assert.equal(market.catalog().count, 2, 'the previous snapshot must survive a failed pull');
 });
 
 test('serverName stays inside the client contract and avoids collisions', () => {

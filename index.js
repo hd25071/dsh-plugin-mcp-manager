@@ -546,9 +546,37 @@ function takenServerNames(ctx) {
   return names;
 }
 
+/**
+ * The configuration one generated row currently carries.
+ *
+ * A reinstall regenerates the whole patch, so without reading the live row first the
+ * values a user typed last time (API keys especially) would vanish. Values are read from
+ * the composed config and never sent to the browser.
+ *
+ * @param ctx - the plugin context.
+ * @param rowId - the generated row's id.
+ * @returns the row's `env` or `headers`, or an empty object.
+ */
+function currentRowConfig(ctx, rowId) {
+  const editor = serviceOf(ctx, 'configEditor');
+  try {
+    if (editor === undefined || typeof editor.configuration !== 'function') return {};
+    for (const item of editor.configuration() || []) {
+      const entry = item && item.entry;
+      if (moduleOfEntry(entry) !== MCP_MODULE) continue;
+      if (idOfEntry(entry) !== rowId) continue;
+      const effective = { ...((item && item.inherited) || {}), ...((item && item.override) || {}) };
+      const values = effective.transport === 'streamable-http' ? effective.headers : effective.env;
+      return values !== null && typeof values === 'object' ? { ...values } : {};
+    }
+  } catch {
+    /* losing the merge only costs retyping a value */
+  }
+  return {};
+}
+
 /** The error a failed fiber carries, however this Cordis build spells it. */
-function errorTextOf(fiber) {
-  for (const key of ['error', 'reason', 'cause']) {
+function errorTextOf(fiber) {  for (const key of ['error', 'reason', 'cause']) {
     try {
       const value = Reflect.get(fiber, key);
       if (value === undefined || value === null) continue;
@@ -744,23 +772,42 @@ async function marketInstallResponse(request, ctx) {
     return failure('no-install-option', 'this machine has no runtime for any package this server publishes', 409);
   }
 
+  // A reinstall keeps whatever the row already carries: the user's secrets are in the
+  // profile, not in this request, and regenerating the patch from scratch would drop them.
+  const slug = market.slugFor(name);
+  const existing = market.manifestFor(slug);
+  const previous = existing === null ? {} : currentRowConfig(ctx, existing.rowId);
+
   // Only declared variables are written, and only when they carry a value.
   const allowed = new Set(plan.variables.map((variable) => variable.name));
-  const config = {};
+  const config = { ...previous };
   for (const [key, value] of Object.entries(body.config || {})) {
     if (!allowed.has(key)) continue;
     if (typeof value !== 'string' || value === '') continue;
     config[key] = value;
   }
-  const missing = plan.variables.filter((variable) => variable.isRequired && config[variable.name] === undefined).map((variable) => variable.name);
+  const missing = plan.variables
+    .filter((variable) => variable.isRequired && (config[variable.name] === undefined || config[variable.name] === ''))
+    .map((variable) => variable.name);
   if (missing.length > 0) return failure('missing-config', `required configuration is empty: ${missing.join(', ')}`, 400);
 
-  const slug = market.slugFor(name);
-  const existing = market.manifestFor(slug);
+  // Argument slots are filled the same way, and a required one left empty is refused
+  // before anything is written.
+  const provided = body.arguments !== null && typeof body.arguments === 'object' ? body.arguments : {};
+  const argumentValues = { ...(existing === null ? {} : existing.argumentValues || {}) };
+  for (const [key, value] of Object.entries(provided)) {
+    if (typeof value !== 'string' || value === '') continue;
+    argumentValues[key] = value;
+  }
+  const { args, missing: missingArguments } = market.resolveArgv(plan, argumentValues);
+  if (missingArguments.length > 0) {
+    return failure('missing-arguments', `required arguments are empty: ${missingArguments.join(', ')}`, 400);
+  }
+
   const serverName = market.serverNameFor(name, takenServerNames(ctx));
   let written;
   try {
-    written = market.writeBundle({ slug, server, serverName, plan, config });
+    written = market.writeBundle({ slug, server, serverName, plan, args, config, argumentValues });
   } catch (error) {
     return failure('write-failed', String((error && error.message) || error), 500);
   }
@@ -774,6 +821,7 @@ async function marketInstallResponse(request, ctx) {
         dir: written.dir,
         serverName,
         reinstalled: existing !== null,
+        keptConfigKeys: Object.keys(previous),
         install: result === undefined ? null : result,
       },
     });
