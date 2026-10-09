@@ -287,13 +287,22 @@ test('uninstalling a local entry takes the same path as a registry one', async (
     },
   };
   host.apply(ctx);
+  // The junction pnpm leaves in the profile is part of the residue, and the route reports
+  // what it pruned so the UI can say so.
+  const scope = join(home, '.dsh', 'profiles', 'desktop', 'node_modules', '@dsh-mcp-market');
+  mkdirSync(scope, { recursive: true });
+  symlinkSync(market.bundleDir(slug), join(scope, slug), 'junction');
+
   const response = await routes.get(host.MARKET_UNINSTALL_PATH).fetch(new Request('http://local' + host.MARKET_UNINSTALL_PATH, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ slug }),
   }));
   assert.equal(response.status, 200);
+  const body = await response.json();
   assert.deepEqual(calls.remove, ['@dsh-mcp-market/' + slug], 'removeBundle first');
   assert.equal(existsSync(market.bundleDir(slug)), false, 'then the directory goes');
   assert.equal(market.listInstalled().length, 0, 'and the manifest forgets it');
+  assert.equal(body.value.pruned.length, 1, 'and the dead link it left behind is pruned');
+  assert.equal(existsSync(join(scope, slug)), false);
 });
 
 test('an entry whose values are all declared installs without a form', async () => {
