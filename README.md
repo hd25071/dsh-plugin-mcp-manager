@@ -36,7 +36,7 @@ DSH 44.0.0 没有"MCP 管理器"页面（`dsh-client-ui-*` 的 48 个包里没�
 | ✅ | **改配置** | 就地编辑字符串/数字/布尔/JSON 字段，保存后写进 profile 的 `cordis.patch.yml` 并由 DSH 热应用 |
 | ✅ | **恢复默认** | 移除该行的 profile 覆盖项，回到组合包声明的值（不是填一份副本） |
 | ✅ | **启停** | 逐行启用/停用（写 `disabled` 覆盖） |
-| ⏳ | **调用记录** | 规划中：宿主侧已确认可读（`tool/call` + `tool/result` 会话事件带 `time`，可算耗时），缺的是"在插件页里选哪个会话"这一步的交互设计 |
+| ✅ | **调用记录** | **右侧停靠栏里的独立页**：按会话列出每次 `mcp__*` 调用 —— 工具名、所属服务器、参数摘要、**耗时**、结果规模、成功/失败，点开看完整记录 |
 
 ## 它是怎么工作的
 
@@ -46,14 +46,25 @@ package.json
   dsh.client        → client.js          浏览器半侧，注册进插件页的 plugins.bundle.config slot
 ```
 
-**Host 半侧**注册四个精确的 Fetch 路由，**浏览器半侧**用文档相对路径 `fetch()` 调用：
+**Host 半侧**注册六个精确的 Fetch 路由，**浏览器半侧**用文档相对路径 `fetch()` 调用：
 
 | 路由 | 方法 | 作用 |
 | --- | --- | --- |
 | `api/mcp-manager/servers` | GET | 清单：id / 模块 / disabled / 继承值 / 覆盖值 / 生效值 |
 | `api/mcp-manager/config` | POST | 写入一行配置（`{id, config}`），或 `{id, reset:true}` 恢复默认 |
 | `api/mcp-manager/enabled` | POST | 启停一行（`{id, enabled}`） |
+| `api/mcp-manager/sessions` | GET | 会话列表（`listSessions()`，最新在前，带 live/persisted） |
+| `api/mcp-manager/calls` | GET | 某个会话的 MCP 调用记录（`?sessionId=&limit=`，缺省取最新会话） |
 | `api/mcp-manager/health` | GET | 诊断：本 profile 挂了哪些服务 |
+
+### 两个界面分别挂在哪
+
+| 界面 | 位置 | 注册方式 |
+| --- | --- | --- |
+| MCP 行总览 + 配置编辑 | 插件页里本组合包自己的页面 | `plugins.bundle.config`（key = 包名，`view: 'page'`） |
+| 调用记录 | **右侧停靠栏的独立页**（和文件树/终端并列） | 两步：`ctx.sidebarRightTabs.register({id, kind, title, keepMounted})` + `ctx.slots.register({name:'sidebar.right.pane.tab', key: <type id>}, Body)` |
+
+调用记录页默认选**最新会话**，也可以在下拉里换会话；插件页上的「调用记录」按钮会把它打开（`ctx.sidebarRight.openTab(kind)`）。
 
 三条实现约束（都是踩过的）：
 
@@ -82,6 +93,9 @@ package.json
 | `form.mutate(ops, expectedRevision)` 返回 `Promise<boolean>`；ops 词表是 `[{op:'set',path,value},{op:'unset',path}]`（**不是** `plugin-manager/lib/types/operations.js` 里那套 pnpm 操作） | `dsh-client-ui-settings/lib/client.js:1177-1194` |
 | MCP 行的判据是 `listBundles().rows[].moduleName === '@deepseek-ai/dsh-mcp-client'`，元素形如 `{rowId, moduleName, entryId?, meta?}`；启停用 `setPluginEnabled(entryId, enabled)` | `dsh-plugin-manager` 的清单类型 |
 | 工具事件载荷里**没有耗时**；要耗时得用持久会话事件的 `time`：`result.time − call.time` | `dsh-session-stats/lib/types/projection.js:123-135` |
+| 配对的权威写法：`tool/call` 用 `data.callId` 开启一次调用；`tool/result` 的调用 id 在 **`data.message.source.callId`**（嵌套），`turn/end` 丢弃没有结果的遗留调用 | 同上 |
+| `sessionQuery` 有 `listSessions()`（轻量、不重放日志）与 `readSession(id)`（重放整份日志）；事件形如 `{type, data, time}`，`tool/call` 的名字在 `data.name` | `dsh-session-query/README.zh.md` |
+| 右侧停靠栏的 tab 类型是**两阶段注册**：先 `ctx.sidebarRightTabs.register({id, kind, ...})` 声明类型，再 `ctx.slots.register({name:'sidebar.right.pane.tab', key: <type id>}, Body)`；`id` 在全部注册中必须唯一 | `dsh-client-ui-sidebar-right/README.zh.md` §扩展席位 |
 | 会话投影的 schema **必须是 Zod**（schemastery 无 `.parse()`，纯 JSON Schema 也不行）；`link:` 安装的包解析不到 `zod`，需自己 vendor 到插件目录的 `node_modules` | 本机另一插件的 vendor 先例 |
 
 ## 安装
@@ -115,10 +129,10 @@ https://github.com/hd25071/dsh-plugin-mcp-manager
 - [x] MCP 行总览（清单 + 生效值 + 覆盖标记）
 - [x] 配置编辑（保存 / 恢复默认）+ 启停
 - [x] 诊断路由（本 profile 挂了哪些服务）
+- [x] 调用记录（右侧停靠栏独立页，按会话，含耗时与结果规模）
 - [ ] **每条 MCP 行自己的配置页**：注册 `plugins.row.config`（key = `<bundle>#<rowId>`），
       让配置控件出现在该行自己的页面上，而不是只在本组合包的卡片里 —— 需要先在一个跑着的 DSH 上验证动态 key 集的注册时机
-- [ ] **调用记录**：宿主路由 + `sessionQuery.readSession(sessionId)`，按 `tool/call` / `tool/result`
-      配对算出耗时与结果规模 —— 待定的只是"插件页里看哪个会话"的交互（会话选择器 / 对话内工具卡片 / 侧栏页）
+- [ ] 调用记录的**跨会话汇总**（当前一次只看一个会话）
 
 ## 状态与验证
 
@@ -127,8 +141,12 @@ https://github.com/hd25071/dsh-plugin-mcp-manager
 
 - `configEditor.configuration()` 与 `loader` entry 的**字段名**在不同版本间可能不同；
   清单路由对 `name`/`module`/`specifier` 做了兼容读取，读不到就退回 `pluginManager.listBundles()` 的只读清单。
+- `listSessions()` 返回对象的字段名（`id` / `title` / `live` / `persisted`）按文档推断并对常见别名做了兜底；
+  若会话下拉为空，看 `/api/mcp-manager/sessions` 的原始返回。
 - `plugins.bundle.config` 的 slot 描述符（`key` / `view`）以官方插件页文档为准，但本插件是首个非官方使用者，
   首次安装若卡片不出现，先看浏览器控制台是否有 `slot entry crashed`。
+- 右侧停靠栏的两阶段注册（`sidebarRightTabs.register` + `sidebar.right.pane.tab`）按官方 README 实现；
+  若 tab 打不开，先看 `ctx.sidebarRight` 是否存在（插件页上的按钮会提示）。
 
 ## 许可
 

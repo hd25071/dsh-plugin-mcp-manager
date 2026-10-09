@@ -37,6 +37,14 @@ export const SERVERS_PATH = '/api/mcp-manager/servers';
 export const CONFIG_PATH = '/api/mcp-manager/config';
 export const ENABLED_PATH = '/api/mcp-manager/enabled';
 export const HEALTH_PATH = '/api/mcp-manager/health';
+export const SESSIONS_PATH = '/api/mcp-manager/sessions';
+export const CALLS_PATH = '/api/mcp-manager/calls';
+
+/** Tool names an MCP server contributes are prefixed this way. */
+const MCP_TOOL_PREFIX = 'mcp__';
+
+/** Default number of calls one response carries. */
+const DEFAULT_CALL_LIMIT = 200;
 
 /**
  * Build one JSON response.
@@ -340,6 +348,167 @@ function healthResponse(ctx) {
   });
 }
 
+/** The MCP server a wire tool name belongs to: `mcp__<server>__<tool>`. */
+function serverOfTool(name) {
+  const parts = String(name).split('__');
+  return parts.length >= 3 ? parts[1] : '';
+}
+
+/** A bounded, display-ready rendering of an arbitrary recorded value. */
+function summarize(value, limit = 400) {
+  if (value === undefined || value === null) return '';
+  let text;
+  try {
+    text = typeof value === 'string' ? value : JSON.stringify(value);
+  } catch {
+    text = String(value);
+  }
+  if (typeof text !== 'string') return '';
+  return text.length > limit ? text.slice(0, limit) + '…' : text;
+}
+
+/** Serialized size of a recorded payload, in bytes. */
+function sizeOf(value) {
+  try {
+    const text = typeof value === 'string' ? value : JSON.stringify(value);
+    return typeof text === 'string' ? text.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Answer the session list route.
+ *
+ * `listSessions()` is deliberately lightweight — it does not replay a log — so the
+ * sidebar page can offer a picker without paying for history.
+ *
+ * @param ctx - the plugin context.
+ * @returns the session envelope.
+ */
+function sessionsResponse(ctx) {
+  const query = serviceOf(ctx, 'sessionQuery');
+  if (query === undefined || typeof query.listSessions !== 'function') {
+    return failure('service-unavailable', 'the sessionQuery service is not mounted in this profile', 503);
+  }
+  let sessions;
+  try {
+    sessions = query.listSessions();
+  } catch (error) {
+    return failure('list-failed', String((error && error.message) || error), 500);
+  }
+  const list = Array.isArray(sessions) ? sessions : [];
+  const mapped = [];
+  for (const session of list) {
+    if (session === null || typeof session !== 'object') continue;
+    const id = session.id || session.sessionId || session.key || '';
+    if (typeof id !== 'string' || id === '') continue;
+    mapped.push({
+      id,
+      title: session.title || session.name || session.summary || '',
+      live: session.live === true,
+      persisted: session.persisted === true,
+      updatedAt: session.updatedAt || session.lastEventAt || session.mtime || null,
+    });
+  }
+  return json({ ok: true, value: { sessions: mapped } });
+}
+
+/**
+ * Fold one session's log into MCP call records.
+ *
+ * Pairing and duration follow the framework's own accounting (`dsh-session-stats`):
+ * a `tool/call` opens a call under `data.callId`, its `tool/result` closes it, the
+ * call id of a result lives at `data.message.source.callId`, and the duration is the
+ * difference of the two event `time` stamps. A call whose result never landed is
+ * dropped, exactly as the framework drops leftovers at `turn/end`.
+ *
+ * @param events - the replayed event log.
+ * @returns closed MCP call records, in log order.
+ */
+function foldCalls(events) {
+  const open = new Map();
+  const calls = [];
+  for (const event of Array.isArray(events) ? events : []) {
+    if (event === null || typeof event !== 'object') continue;
+    const data = event.data || {};
+    if (event.type === 'tool/call') {
+      const name = typeof data.name === 'string' ? data.name : '';
+      if (!name.startsWith(MCP_TOOL_PREFIX)) continue;
+      const callId = typeof data.callId === 'string' ? data.callId : '';
+      open.set(callId, {
+        callId,
+        tool: name,
+        server: serverOfTool(name),
+        at: typeof event.time === 'number' ? event.time : null,
+        args: summarize(data.arguments),
+        durationMs: null,
+        resultBytes: null,
+        ok: null,
+        error: '',
+      });
+      continue;
+    }
+    if (event.type === 'tool/result') {
+      const source = data.message && data.message.source;
+      const callId = (source && source.callId) || '';
+      const record = open.get(callId);
+      if (record === undefined) continue;
+      open.delete(callId);
+      const at = typeof event.time === 'number' ? event.time : null;
+      record.durationMs = record.at !== null && at !== null ? Math.max(0, at - record.at) : null;
+      const message = data.message === undefined ? data : data.message;
+      record.resultBytes = sizeOf(message);
+      record.ok = !(data.message && (data.message.isError === true || data.message.error !== undefined));
+      record.error = record.ok ? '' : summarize(data.message && data.message.error, 200);
+      calls.push(record);
+    }
+  }
+  return calls;
+}
+
+/**
+ * Answer the call-log route.
+ *
+ * @param request - the incoming request.
+ * @param ctx - the plugin context.
+ * @returns the call envelope.
+ */
+async function callsResponse(request, ctx) {
+  const query = serviceOf(ctx, 'sessionQuery');
+  if (query === undefined || typeof query.readSession !== 'function') {
+    return failure('service-unavailable', 'the sessionQuery service is not mounted in this profile', 503);
+  }
+  const params = new URL(request.url).searchParams;
+  let sessionId = params.get('sessionId') || '';
+  if (sessionId === '' && typeof query.listSessions === 'function') {
+    try {
+      const list = query.listSessions();
+      const first = Array.isArray(list) ? list[0] : undefined;
+      sessionId = (first && (first.id || first.sessionId || first.key)) || '';
+    } catch {
+      /* fall through to the bad-request answer */
+    }
+  }
+  if (sessionId === '') return failure('bad-request', 'no session available to read', 400);
+
+  let loaded;
+  try {
+    loaded = await query.readSession(sessionId);
+  } catch (error) {
+    return failure('session-unreadable', String((error && error.message) || error), 500);
+  }
+
+  const server = params.get('server') || '';
+  const rawLimit = Number(params.get('limit'));
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.floor(rawLimit) : DEFAULT_CALL_LIMIT;
+  let calls = foldCalls(loaded && loaded.events);
+  if (server !== '') calls = calls.filter((call) => call.server === server);
+  const total = calls.length;
+  calls.reverse();
+  return json({ ok: true, value: { sessionId, total, calls: calls.slice(0, limit) } });
+}
+
 /**
  * Register the Fetch routes.
  *
@@ -365,6 +534,8 @@ export function apply(ctx) {
 
   register(SERVERS_PATH, ['GET', 'HEAD'], async (_request, context) => serversResponse(context));
   register(HEALTH_PATH, ['GET', 'HEAD'], async (_request, context) => healthResponse(context));
+  register(SESSIONS_PATH, ['GET', 'HEAD'], async (_request, context) => sessionsResponse(context));
+  register(CALLS_PATH, ['GET', 'HEAD'], async (request, context) => callsResponse(request, context));
   register(CONFIG_PATH, ['POST'], async (request, context) => configResponse(request, context));
   register(ENABLED_PATH, ['POST'], async (request, context) => enabledResponse(request, context));
 }

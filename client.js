@@ -19,6 +19,11 @@ window.__ModuleLoader__.load({
     const SERVERS_ROUTE = 'api/mcp-manager/servers';
     const CONFIG_ROUTE = 'api/mcp-manager/config';
     const ENABLED_ROUTE = 'api/mcp-manager/enabled';
+    const SESSIONS_ROUTE = 'api/mcp-manager/sessions';
+    const CALLS_ROUTE = 'api/mcp-manager/calls';
+
+    /** The right-dock tab type this bundle contributes. */
+    const CALLS_KIND = 'mcp-manager-calls';
 
     // ------------------------------------------------------------------ transport
 
@@ -48,6 +53,20 @@ window.__ModuleLoader__.load({
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ id, enabled }),
     });
+    const listSessions = () => call(SESSIONS_ROUTE);
+    const listCalls = (sessionId, limit) => {
+      const params = new URLSearchParams();
+      if (sessionId) params.set('sessionId', sessionId);
+      if (limit) params.set('limit', String(limit));
+      const query = params.toString();
+      return call(CALLS_ROUTE + (query === '' ? '' : '?' + query));
+    };
+
+    /**
+     * The sidebar controller, captured in `apply`. The manager page uses it to open
+     * the call-log tab; the tab itself reads nothing from it.
+     */
+    const dock = { sidebarRight: null };
 
     // -------------------------------------------------------------------- helpers
 
@@ -246,6 +265,107 @@ window.__ModuleLoader__.load({
       );
     }
 
+    // ------------------------------------------------------- call log (side dock)
+
+    /**
+     * The right-dock page: one session's MCP tool calls, newest first.
+     *
+     * Sessions come from the host's `listSessions()` (lightweight — it does not
+     * replay a log), and the newest is selected by default so the page is useful
+     * without any interaction.
+     */
+    function CallsPanel() {
+      const [sessions, setSessions] = React.useState([]);
+      const [sessionId, setSessionId] = React.useState('');
+      const [state, setState] = React.useState({ status: 'loading', calls: [], total: 0, error: '' });
+      const [open, setOpen] = React.useState({});
+
+      const loadCalls = React.useCallback(async (id) => {
+        if (!id) return;
+        setState((s) => ({ ...s, status: 'loading', error: '' }));
+        try {
+          const value = await listCalls(id, 200);
+          setState({
+            status: 'ready',
+            calls: (value && value.calls) || [],
+            total: (value && value.total) || 0,
+            error: '',
+          });
+        } catch (e) {
+          setState({ status: 'ready', calls: [], total: 0, error: String((e && e.message) || e) });
+        }
+      }, []);
+
+      const boot = React.useCallback(async () => {
+        try {
+          const value = await listSessions();
+          const list = (value && value.sessions) || [];
+          setSessions(list);
+          const first = (list[0] && list[0].id) || '';
+          setSessionId(first);
+          if (first) await loadCalls(first);
+          else setState({ status: 'ready', calls: [], total: 0, error: '没有可读的会话' });
+        } catch (e) {
+          setState({ status: 'ready', calls: [], total: 0, error: String((e && e.message) || e) });
+        }
+      }, [loadCalls]);
+
+      React.useEffect(() => { boot(); }, [boot]);
+
+      const pick = async (id) => { setSessionId(id); await loadCalls(id); };
+      const ms = (v) => (typeof v === 'number' ? (v >= 1000 ? (v / 1000).toFixed(2) + ' s' : v + ' ms') : '—');
+      const bytes = (v) => (typeof v === 'number' ? (v >= 1024 ? (v / 1024).toFixed(1) + ' KB' : v + ' B') : '—');
+      const clock = (v) => (typeof v === 'number' ? new Date(v).toLocaleTimeString() : '—');
+
+      return h('div', { style: { ...S.page, padding: '8px 10px' } },
+        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 } },
+          h('select', {
+            style: { ...S.input, flex: 1 },
+            value: sessionId,
+            onChange: (e) => pick(e.target.value),
+          }, sessions.length === 0
+            ? h('option', { value: '' }, '（没有会话）')
+            : sessions.map((s) => h('option', { key: s.id, value: s.id },
+                (s.title ? String(s.title).slice(0, 60) + ' · ' : '') +
+                s.id.slice(0, 8) + (s.live ? ' · 活动' : '')))),
+          h('button', { style: S.btn, onClick: () => loadCalls(sessionId) }, '刷新'),
+        ),
+
+        state.error ? h('div', { style: S.err }, state.error) : null,
+        state.status === 'loading' ? h('div', { style: S.muted }, '读取中…') : null,
+        state.status === 'ready' && !state.error
+          ? h('div', { style: { ...S.muted, marginBottom: 6 } },
+              state.calls.length + ' / ' + state.total + ' 次 MCP 调用')
+          : null,
+        state.status === 'ready' && !state.error && state.calls.length === 0
+          ? h('div', { style: S.muted }, '这个会话里没有 MCP 工具调用。')
+          : null,
+
+        state.calls.map((call, index) => {
+          const key = call.callId || String(index);
+          const isOpen = !!open[key];
+          return h('div', {
+            key,
+            style: { ...S.card, padding: '7px 9px', marginBottom: 6, cursor: 'pointer' },
+            onClick: () => setOpen((o) => ({ ...o, [key]: !isOpen })),
+          },
+            h('div', { style: { display: 'flex', gap: 6, alignItems: 'baseline', flexWrap: 'wrap' } },
+              h('span', { style: { ...S.mono, fontWeight: 600 } }, call.tool || '?'),
+              h('span', { style: { ...S.tag, ...S.muted } }, call.server || '—'),
+              h('span', { style: { ...S.tag, ...(call.ok === false ? S.err : S.muted) } },
+                call.ok === false ? '失败' : (call.ok === true ? '成功' : '未完成')),
+              h('span', { style: { ...S.muted, ...S.mono } },
+                ms(call.durationMs) + ' · ' + bytes(call.resultBytes)),
+            ),
+            h('div', { style: { ...S.mono, ...S.muted, marginTop: 3 } },
+              clock(call.at) + '  ' + String(call.args || '').slice(0, 120)),
+            isOpen ? h('pre', { style: S.pre }, JSON.stringify(call, null, 2)) : null,
+            isOpen && call.error ? h('div', { style: S.err }, call.error) : null,
+          );
+        }),
+      );
+    }
+
     // ---------------------------------------------------------------------- page
 
     function Panel() {
@@ -266,14 +386,30 @@ window.__ModuleLoader__.load({
       const rows = (value && value.rows) || [];
       const caps = (value && value.capabilities) || {};
 
+      const openCalls = () => {
+        const controller = dock.sidebarRight;
+        if (!controller || typeof controller.openTab !== 'function') {
+          setNote('本部署没有右侧停靠栏，调用记录页打不开。');
+          return;
+        }
+        try {
+          controller.openTab(CALLS_KIND);
+        } catch (e) {
+          setNote('打开失败：' + String((e && e.message) || e));
+        }
+      };
+
       return h('div', { style: S.page },
         h('div', { style: S.head },
           h('div', { style: S.title }, 'MCP 管理器'),
           h('div', { style: S.muted },
             state.status === 'loading' ? '读取中…'
               : rows.length + ' 条 MCP 行' + (value && value.source ? '（来源：' + value.source + '）' : '')),
+          h('button', { style: S.btn, onClick: openCalls }, '调用记录'),
           h('button', { style: S.btn, onClick: load }, '刷新'),
         ),
+
+        note ? h('div', { style: { ...S.muted, marginBottom: 8 } }, note) : null,
 
         state.error ? h('div', { style: S.err }, state.error) : null,
 
@@ -297,12 +433,28 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots'],
       apply(ctx) {
+        // The manager page lives on this bundle's own page in the Plugins page.
         ctx.slots.inject('plugins.bundle.config', () =>
           ctx.slots.register({
             name: 'plugins.bundle.config',
             key: BUNDLE,
             view: 'page',
           }, Panel));
+
+        // The call log is a page of its own in the right dock: one tab type, plus the
+        // body registered under that type's id. Both live in an effect so they are
+        // disposed with the plugin.
+        dock.sidebarRight = ctx.sidebarRight || null;
+        if (ctx.sidebarRightTabs && typeof ctx.sidebarRightTabs.register === 'function') {
+          ctx.effect(() => ctx.sidebarRightTabs.register({
+            id: BUNDLE,
+            kind: CALLS_KIND,
+            title: () => 'MCP 调用记录',
+            keepMounted: true,
+          }));
+        }
+        ctx.slots.inject('sidebar.right.pane.tab', () =>
+          ctx.slots.register({ name: 'sidebar.right.pane.tab', key: BUNDLE }, CallsPanel));
       },
     };
   },
