@@ -468,29 +468,33 @@ window.__ModuleLoader__.load({
    MCP market class table. This block is the whole visual layer: components carry
    semantic class names and data-state only, so replacing this replaces the look.
 
-   Colours come from the host's own tokens first (verified present in DSH 44:
-   --dsw-alias-button-primary-fill, --dsw-alias-label-primary-foreground,
-   --dsw-alias-state-success-primary, --dsw-alias-state-warn-primary,
-   --dsw-alias-state-error-primary, --dsw-alias-border-l1, --dsw-alias-label-secondary,
-   --dsw-radius-md). The fallbacks are only for rendering outside the app.
+   Colours come from the host's own tokens first (verified present in DSH 44, and traced to
+   their final values in dsh-client-ui-theme: the brand colour is a neutral — #0f1115 in
+   light, #f9fafb in dark, with the foreground inverting — while the state colours map to
+   the static palette, green-500 #22c55e / amber-500 #f59e0b / red-500 #ef4444, and are the
+   same in both themes). The fallbacks below mirror those exact values, so a render outside
+   the app matches the app.
    --------------------------------------------------------------------------- */
 .mcpm-page {
-  --mcpm-accent: var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary, #3b6de0));  --mcpm-accent-fg: var(--dsw-alias-label-primary-foreground, #ffffff);
-  --mcpm-success: var(--dsw-alias-state-success-primary, var(--mcpm-success-fb, #1a7f37));
-  --mcpm-warning: var(--dsw-alias-state-warn-primary, var(--mcpm-warning-fb, #9a6700));
-  --mcpm-danger: var(--dsw-alias-state-error-primary, #c0392b);
+  --mcpm-accent: var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary, #0f1115));
+  --mcpm-accent-fg: var(--dsw-alias-label-primary-foreground, #ffffff);
+  --mcpm-success: var(--dsw-alias-state-success-primary, #22c55e);
+  --mcpm-warning: var(--dsw-alias-state-warn-primary, #f59e0b);
+  --mcpm-danger: var(--dsw-alias-state-error-primary, #ef4444);
   --mcpm-border: var(--dsw-alias-border-l1, rgba(128, 128, 128, .28));
   --mcpm-border-strong: var(--dsw-alias-border-l2, rgba(128, 128, 128, .4));
   --mcpm-muted: var(--dsw-alias-label-secondary, rgba(128, 128, 128, .95));
   --mcpm-radius: var(--dsw-radius-md, 10px);
-  --mcpm-success-fb: #1a7f37;
-  --mcpm-warning-fb: #9a6700;
   display: flex; flex-direction: column; gap: 12px; height: 100%; box-sizing: border-box;
   padding: 16px; overflow-y: auto;
   color: var(--dsw-alias-label-primary, inherit); font-size: 13px; line-height: 20px;
 }
+/* Only the accent needs a dark fallback: DSH inverts that one and keeps the states fixed. */
 @media (prefers-color-scheme: dark) {
-  .mcpm-page { --mcpm-success-fb: #3fb950; --mcpm-warning-fb: #d29922; }
+  .mcpm-page {
+    --mcpm-accent: var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary, #f9fafb));
+    --mcpm-accent-fg: var(--dsw-alias-label-primary-foreground, #0f1115);
+  }
 }
 /* The search box is sized with flex-basis:100% on a narrow screen, so every box in here
    has to count its padding inside that width or the page scrolls sideways. */
