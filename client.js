@@ -1248,12 +1248,19 @@ window.__ModuleLoader__.load({
                 h('span', { className: 'mcpm-field__label' }, '新装'),
                 h('pre', { className: 'mcpm-pre' }, commandLineOf(option, argValues))),
             )
-          : option
+          : option && option.registryType === 'mcpb'
+            // An mcpb package carries its command line inside its manifest, so there is nothing
+            // to show yet — saying so is more honest than an empty command block.
             ? h('div', null,
-                h('div', { className: 'mcpm-note' }, option.kind === 'http' ? '将连接到的地址' : '将执行的命令'),
-                h('pre', { className: 'mcpm-pre' }, commandLineOf(option, argValues)),
+                h('div', { className: 'mcpm-note' }, '📦 这是一个 mcpb 包，安装时将下载并解压到本地执行'),
+                h('div', { className: 'mcpm-note' }, '⚠️ 命令由包内 manifest 决定，安装后才能确定'),
               )
-            : null,
+            : option
+              ? h('div', null,
+                  h('div', { className: 'mcpm-note' }, option.kind === 'http' ? '将连接到的地址' : '将执行的命令'),
+                  h('pre', { className: 'mcpm-pre' }, commandLineOf(option, argValues)),
+                )
+              : null,
 
         // Every risk in one place, above the form: the reader learns what this is, where it
         // comes from and what it replaces before reading what it costs. The command line is

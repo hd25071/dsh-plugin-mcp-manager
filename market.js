@@ -32,6 +32,7 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import * as local from './local.js';
+import * as mcpb from './mcpb.js';
 import { delimiter, join } from 'node:path';
 
 /** The official registry endpoint that serves the catalog. */
@@ -808,6 +809,32 @@ export function plansFor(server, runtimes) {
     };
   }
   for (const pack of server.packages) {
+    if (pack.registryType === 'mcpb') {
+      // Nothing about the command line is knowable here: it lives in the package's manifest,
+      // which only exists after the download. The plan therefore marks itself as needing one,
+      // and the install route finishes the job.
+      const probe = mcpb.probeMcpb(pack);
+      if (!probe.ok) {
+        blocked.push({ registryType: 'mcpb', identifier: pack.identifier, reason: probe.reason });
+        continue;
+      }
+      options.push({
+        kind: 'stdio',
+        registryType: 'mcpb',
+        label: `mcpb 包 · 安装时下载解压`,
+        transport: 'stdio',
+        needsDownload: true,
+        identifier: probe.identifier,
+        packageVersion: probe.version,
+        command: '',
+        argv: [],
+        slots: [],
+        env: {},
+        variables: [],
+        risk: '将下载并解压外部包到本地执行',
+      });
+      continue;
+    }
     if (pack.registryType === 'npm') {
       if (!runtimes.npx.available) {
         const found = runtimes.node.withoutNpm === '' ? '没有找到 Node.js' : `只找到 ${runtimes.node.withoutNpm}（不带 npm）`;
@@ -1158,6 +1185,59 @@ function writePruneReport(report) {
   }
 }
 
+/**
+ * Download an mcpb package into a bundle directory and read its manifest.
+ *
+ * Kept here rather than in the route so the runtime facts the manifest is checked against —
+ * which programs exist, which versions — come from the same detection the cards use.
+ *
+ * @param identifier - the https URL.
+ * @param targetDir - the `mcpb/` directory inside the generated bundle.
+ * @returns the mcpb module's result, unchanged.
+ */
+export async function fetchMcpb(identifier, targetDir) {
+  return mcpb.downloadAndExtract(identifier, targetDir);
+}
+
+/**
+ * Turn a package manifest into the row's command line, using this machine's runtimes.
+ *
+ * @param manifest - the parsed manifest.
+ * @param extractedDir - where it was extracted.
+ * @param config - the values the install form collected.
+ * @param ctx - the plugin context, for nothing but consistency with the other helpers.
+ * @returns `{ok, command, args, env, variables, warnings}` or `{ok: false, reason}`.
+ */
+export function planFromMcpb(manifest, extractedDir, config, ctx) {
+  const runtimes = detectRuntimes();
+  return mcpb.manifestToPlan(manifest, extractedDir, config || {}, {
+    runtimes,
+    locate: (name) => locate([name, `${name}.exe`, `${name}.cmd`], runtimeDirsFor(name, runtimes)),
+    nodeVersion: process.versions.node,
+    uvVersion: uvVersionOf(runtimes),
+  });
+}
+
+/** Where a program of this kind would live, for the mcpb resolver. */
+function runtimeDirsFor(name, runtimes) {
+  const home = homedir();
+  if (name === 'node') return [join(String(runtimes.npx.command || ''), '..')];
+  if (name === 'uv' || name === 'uvx') return [join(home, '.local', 'bin'), join(process.env.LOCALAPPDATA || home, 'Programs', 'Python', 'Scripts')];
+  return [join(home, '.local', 'bin'), 'C:\\Program Files', 'C:\\Program Files (x86)'];
+}
+
+/** The uv version, asked once per call: `uv --version` prints `uv 0.12.24 (…)`. */
+function uvVersionOf(runtimes) {
+  const uvx = runtimes?.uvx?.path || '';
+  if (uvx === '') return '';
+  try {
+    const out = execFileSync(uvx, ['--version'], { encoding: 'utf8', timeout: 5000 });
+    const match = /(\d+\.\d+\.\d+)/.exec(String(out));
+    return match === null ? '' : match[1];
+  } catch {
+    return '';
+  }
+}
 /** The directory of one generated bundle. */
 export function bundleDir(slug) {
   return join(MARKET_ROOT, slug);
@@ -1197,7 +1277,7 @@ export function manifestFor(slug) {
  * @param options - `{slug, server, serverName, plan, args, config, argumentKeys}`.
  * @returns `{slug, dir, pkg, rowId}`.
  */
-export function writeBundle({ slug, server, serverName, plan, args, config, argumentValues }) {
+export function writeBundle({ slug, server, serverName, plan, args, config, argumentValues, mcpbInfo }) {
   const dir = bundleDir(slug);
   ensureRoot();
   mkdirSync(dir, { recursive: true });
@@ -1213,6 +1293,7 @@ export function writeBundle({ slug, server, serverName, plan, args, config, argu
     registryTitle: server.title,
     installedAt: new Date().toISOString(),
     source: server.source === 'local' ? 'local' : 'registry',
+    mcpb: mcpbInfo === undefined ? null : mcpbInfo,
     slug,
     pkg,
     rowId,

@@ -842,9 +842,25 @@ async function marketInstallResponse(request, ctx) {
   }
 
   const serverName = market.serverNameFor(name, takenServerNames(ctx));
+  // An mcpb plan carries no command line: it lives in the package's manifest, which only
+  // exists after the download. So the download happens here, inside the bundle directory the
+  // install already owns, and its manifest decides what actually runs.
+  let mcpbInfo = null;
+  if (plan.needsDownload === true && plan.registryType === 'mcpb') {
+    const targetDir = join(market.bundleDir(slug), 'mcpb');
+    const fetched = await market.fetchMcpb(plan.identifier, targetDir);
+    if (!fetched.ok) return failure('mcpb-download-failed', fetched.reason, 400);
+    const mapped = market.planFromMcpb(fetched.manifest, fetched.extractedDir, config, ctx);
+    if (!mapped.ok) return failure('mcpb-manifest-rejected', mapped.reason, 400);
+    plan.command = mapped.command;
+    plan.env = mapped.env;
+    args = mapped.args;
+    mcpbInfo = { identifier: plan.identifier, bytes: fetched.bytes, entries: fetched.entries, entryPoint: mapped.entryPoint };
+  }
+
   let written;
   try {
-    written = market.writeBundle({ slug, server, serverName, plan, args, config, argumentValues });
+    written = market.writeBundle({ slug, server, serverName, plan, args, config, argumentValues, mcpbInfo });
   } catch (error) {
     return failure('write-failed', String((error && error.message) || error), 500);
   }
