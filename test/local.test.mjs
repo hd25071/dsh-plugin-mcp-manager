@@ -47,13 +47,13 @@ function seedLocal(entries, extra = {}) {
 
 const stdioEntry = (name, overrides = {}) => ({
   name,
-  title: '我的知识库',
-  description: 'kb.py mcp',
+  title: '示例服务',
+  description: 'server.py mcp',
   install: {
     kind: 'stdio',
     command: 'C:\\Windows\\py.exe',
-    args: ['D:\\kb\\kb.py', 'mcp'],
-    env: [{ name: 'PYTHONUTF8', value: '1' }, { name: 'KB_API_KEY', description: 'Key', isRequired: true, isSecret: true }],
+    args: ['D:\\tools\\demo\\server.py', 'mcp'],
+    env: [{ name: 'PYTHONUTF8', value: '1' }, { name: 'DEMO_API_KEY', description: 'Key', isRequired: true, isSecret: true }],
     ...overrides,
   },
 });
@@ -69,7 +69,7 @@ test('a valid stdio entry and a valid http entry normalize', () => {
     cacheVersion: 1,
     entries: [
       stdioEntry('vendor.example/kb'),
-      { name: 'vendor.example/hub', title: '枢纽', install: { kind: 'http', url: 'http://10.0.0.1:8080/mcp', headers: [{ name: 'X-Token', isRequired: true, isSecret: true }] } },
+      { name: 'vendor.example/hub', title: '示例', install: { kind: 'http', url: 'http://10.0.0.1:8080/mcp', headers: [{ name: 'X-Token', isRequired: true, isSecret: true }] } },
     ],
   });
   assert.deepEqual(result.errors, []);
@@ -79,7 +79,7 @@ test('a valid stdio entry and a valid http entry normalize', () => {
   assert.equal(stdio.source, 'local');
   assert.equal(stdio.local.kind, 'stdio');
   assert.equal(stdio.local.command, 'C:\\Windows\\py.exe');
-  assert.deepEqual(stdio.local.args, ['D:\\kb\\kb.py', 'mcp']);
+  assert.deepEqual(stdio.local.args, ['D:\\tools\\demo\\server.py', 'mcp']);
   // A declared value answers the field, so the form will not ask for it again.
   assert.deepEqual(stdio.local.env[0], { name: 'PYTHONUTF8', description: '', isRequired: false, isSecret: false, default: '1' });
   assert.equal(stdio.local.env[1].isRequired, true);
@@ -196,14 +196,14 @@ test('installing a local entry over an installed registry version replaces it', 
 
   const installed = await call(host.MARKET_INSTALL_PATH, host.MARKET_INSTALL_PATH, post({
     name: 'vendor.example/notes', optionIndex: 0,
-    config: { KB_API_KEY: 'k', EXISTING_KEY: 'kept' },
+    config: { DEMO_API_KEY: 'k', EXISTING_KEY: 'kept' },
   }));
   assert.equal(installed.status, 200);
   assert.equal(installed.body.value.slug, slug, 'the same bundle, replaced');
 
   const manifest = JSON.parse(readFileSync(join(market.bundleDir(slug), 'market.meta.json'), 'utf8'));
   assert.equal(manifest.source, 'local');
-  assert.deepEqual(manifest.configKeys.sort(), ['EXISTING_KEY', 'KB_API_KEY'], 'the earlier configuration is merged, not dropped');
+  assert.deepEqual(manifest.configKeys.sort(), ['DEMO_API_KEY', 'EXISTING_KEY'], 'the earlier configuration is merged, not dropped');
 
   const patch = readFileSync(join(market.bundleDir(slug), 'cordis.patch.yml'), 'utf8');
   assert.match(patch, /command: "C:\\\\Windows\\\\py\.exe"/, 'the local command line reaches the row');

@@ -155,20 +155,20 @@ ctx.reflect.provide("pluginNavigation", {
   "cacheVersion": 1,
   "entries": [
     {
-      "name": "yuwei/kb",
-      "title": "我的知识库",
-      "description": "本地知识库检索（kb.py mcp）",
+      "name": "local.example/demo",
+      "title": "示例服务",
+      "description": "本地示例服务（server.py mcp）",
       "install": {
         "kind": "stdio",
         "command": "C:\\Windows\\py.exe",
-        "args": ["D:\\yuwei\\kb\\tools\\kb\\kb.py", "mcp"],
+        "args": ["D:\\tools\\demo\\server.py", "mcp"],
         "env": [
           { "name": "PYTHONUTF8", "value": "1" },
-          { "name": "KB_API_KEY", "description": "知识库 API Key", "isRequired": true, "isSecret": true }
+          { "name": "DEMO_API_KEY", "description": "示例 API Key", "isRequired": true, "isSecret": true }
         ]
       }
     },
-    { "name": "yuwei/hub", "install": { "kind": "http", "url": "http://10.66.0.1:8080/mcp" } }
+    { "name": "local.example/hub", "install": { "kind": "http", "url": "http://127.0.0.1:8080/mcp" } }
   ]
 }
 ```
