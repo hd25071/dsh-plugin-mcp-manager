@@ -20,6 +20,7 @@
 import { createHash } from 'node:crypto';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -57,6 +58,10 @@ export const CACHE_DIR = join(homedir(), '.dsh', 'mcp-market');
 export const CACHE_PATH = join(CACHE_DIR, 'market-cache.json');
 /** Package-name prefix of a generated bundle. */
 export const BUNDLE_PREFIX = '@dsh-mcp-market/';
+
+/** The package scope those bundles live under, for the profile's 
+ode_modules layout. */
+export const BUNDLE_SCOPE = '@dsh-mcp-market';
 /** Row-id prefix of a generated row, kept distinct from hand-written rows. */
 export const ROW_PREFIX = 'mcp-';
 /** The registry's per-version metadata block. */
@@ -458,7 +463,15 @@ export function searchCatalog(query, options = {}) {
   }
   if (sort === 'newest') scored.sort((left, right) => String(right.server.publishedAt || '').localeCompare(String(left.server.publishedAt || '')));
   else if (sort === 'name') scored.sort((left, right) => left.server.name.localeCompare(right.server.name));
-  else scored.sort((left, right) => right.value - left.value || left.server.name.localeCompare(right.server.name));
+  else scored.sort((left, right) => {
+    // In the default order the user's own entries come first — the catalog is for browsing,
+    // but what you wrote yourself should not be on page 231. The other sorts leave them to
+    // compete on their own attributes, which is what 最新上架 and 名称 mean.
+    const own = (server) => (server.source === 'local' ? 0 : 1);
+    return own(left.server) - own(right.server)
+      || right.value - left.value
+      || left.server.name.localeCompare(right.server.name);
+  });
 
   const page = scored.slice(offset, offset + limit).map((item) => {
     const summary = summarize(item.server);
@@ -784,6 +797,14 @@ export function plansFor(server, runtimes) {
   // A local entry carries its own command line, so it skips the package-to-command mapping
   // entirely: there is no registry package to interpret, only what the file says.
   if (server.source === 'local' && server.local !== undefined) return localPlans(server);
+  // An entry can declare nothing at all — no package and no remote. That is upstream data,
+  // not a machine limitation, and it must still say so instead of failing silently.
+  if (server.packages.length === 0 && server.remotes.length === 0) {
+    return {
+      options,
+      blocked: [{ registryType: '', identifier: '', reason: '该注册表条目没有声明任何安装方式（既无 package 也无 remote）' }],
+    };
+  }
   for (const pack of server.packages) {
     if (pack.registryType === 'npm') {
       if (!runtimes.npx.available) {
@@ -970,6 +991,46 @@ export function renderPackageJson(slug, version, description) {
   }, null, 2)}\n`;
 }
 
+/**
+ * Remove the package-manager links a removed bundle leaves behind.
+ *
+ * `pluginManager.removeBundle` drops the dependency and the bundle directory, but the
+ * junction pnpm created under the profile's `node_modules` stays and points at nothing.
+ * Only links whose target is already gone are touched, so a bundle still installed in some
+ * other profile keeps its link.
+ *
+ * @param slug - the bundle slug that was removed.
+ * @returns the paths that were pruned.
+ */
+export function pruneBundleLinks(slug) {
+  const removed = [];
+  const profiles = join(homedir(), '.dsh', 'profiles');
+  let names = [];
+  try {
+    names = readdirSync(profiles);
+  } catch {
+    return removed;
+  }
+  for (const name of names) {
+    const link = join(profiles, name, 'node_modules', BUNDLE_SCOPE, slug);
+    let info;
+    try {
+      info = lstatSync(link);
+    } catch {
+      continue;
+    }
+    if (!info.isSymbolicLink()) continue;
+    // A live link keeps working; only a dangling one is residue.
+    if (existsSync(link)) continue;
+    try {
+      rmSync(link, { recursive: true, force: true });
+      removed.push(link);
+    } catch {
+      /* the next uninstall tries again */
+    }
+  }
+  return removed;
+}
 /** The directory of one generated bundle. */
 export function bundleDir(slug) {
   return join(MARKET_ROOT, slug);

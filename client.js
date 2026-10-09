@@ -564,6 +564,8 @@ window.__ModuleLoader__.load({
 .mcpm-badge--unavailable { color: var(--dsw-alias-state-error-primary, #ef4444); }
 .mcpm-badge--more { color: var(--mcpm-muted); border-style: dashed; }
 /* A local entry is a different kind of thing from a registry one, so it says so. */
+/* A row that registered nothing is a warning, not a neutral fact. */
+.mcpm-badge--tools-warn { color: var(--dsw-alias-state-warn-primary, #f59e0b); border-color: var(--dsw-alias-state-warn-primary, #f59e0b); }
 .mcpm-badge--own { color: var(--dsw-alias-button-primary-fill, #0f1115); border-color: var(--dsw-alias-button-primary-fill, #0f1115); }
 .mcpm-dialog--replace { border-color: var(--dsw-alias-state-warn-primary, #f59e0b); }
 
@@ -832,9 +834,15 @@ window.__ModuleLoader__.load({
             item.updateAvailable
               ? h('span', { key: 'update', className: 'mcpm-badge mcpm-badge--update' }, '目录版本 v' + item.latestVersion)
               : null,
+            // Zero tools is not "nothing to say": a row that connects and registers nothing is
+            // exactly the silent failure this badge exists to expose.
             item.toolCount === null || item.toolCount === undefined
-              ? null
-              : h('span', { key: 'tools', className: 'mcpm-badge mcpm-badge--tools' }, '✓ ' + item.toolCount + ' 个工具'),
+              ? (item.toolState === 'unknown'
+                  ? h('span', { key: 'tools', className: 'mcpm-badge' }, '工具数未知')
+                  : null)
+              : (item.toolCount === 0
+                  ? h('span', { key: 'tools', className: 'mcpm-badge mcpm-badge--tools-warn' }, '⚠ 0 个工具')
+                  : h('span', { key: 'tools', className: 'mcpm-badge mcpm-badge--tools' }, '✓ ' + item.toolCount + ' 个工具')),
           ]),
         ),
         h('div', { className: 'mcpm-card__actions' },

@@ -658,7 +658,12 @@ function stateOfRow(ctx, manifest, toolNames) {
     const prefix = `mcp__${manifest.serverName}__`;
     toolCount = toolNames.filter((name) => name.startsWith(prefix)).length;
   }
-  return { state, error, toolCount };
+  // "Running" alone hides the failure that started this: a row whose endpoint answers 401
+  // connects, registers nothing, and looks healthy. Three states, and the UI says which.
+  const toolState = toolNames === null
+    ? 'unknown'
+    : (toolCount === null || toolCount === 0 ? 'none' : 'ok');
+  return { state, error, toolCount, toolState };
 }
 
 /**
@@ -894,7 +899,11 @@ async function marketUninstallResponse(request, ctx) {
     return failure('uninstall-failed', String((error && error.message) || error), 500);
   }
   const deleted = market.removeBundleDir(slug);
-  return json({ ok: true, value: { slug, pkg: manifest.pkg, removed: removed === undefined ? null : removed, deleted } });
+  // The package manager leaves its junction behind, pointing at the directory just deleted.
+  // Pruning it here is the difference between "uninstalled" and "uninstalled with a dead link
+  // still sitting in the profile's node_modules".
+  const pruned = market.pruneBundleLinks(slug);
+  return json({ ok: true, value: { slug, pkg: manifest.pkg, removed: removed === undefined ? null : removed, deleted, pruned } });
 }
 
 /**
@@ -915,6 +924,7 @@ function marketInstalledResponse(ctx) {
       state: live.state,
       error: live.error,
       toolCount: live.toolCount,
+      toolState: live.toolState,
       latestVersion: entry === null ? null : entry.version,
       // A local entry has no registry counterpart to be newer than, so the comparison is
     // skipped entirely: no update badge, and no 目录版本 vX（不同） line either.

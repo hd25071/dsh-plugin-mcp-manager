@@ -4,7 +4,7 @@
 // `~/.dsh` — the same isolation the other host suites use.
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -373,6 +373,68 @@ test('the search route forwards the 自建 filter', async () => {
   assert.equal(allBody.value.total, 2, 'no parameter still means everything');
 });
 
+test('an entry that declares nothing says so instead of failing silently', () => {
+  const result = market.plansFor({
+    name: 'vendor.example/empty', title: 'Empty', description: '', version: '1.0.0',
+    publishedAt: null, packages: [], remotes: [], source: 'registry',
+  }, market.detectRuntimes());
+  assert.deepEqual(result.options, []);
+  assert.equal(result.blocked.length, 1, 'the reason is upstream data, and it is named');
+  assert.match(result.blocked[0].reason, /没有声明任何安装方式/);
+});
+
+test('the default order puts local entries first, the others do not', () => {
+  seedRegistry();
+  // Named so that alphabetical order puts the registry entry first: that way "the local entry
+  // leads" under 名称 would prove the sort was overridden, not just that z comes after v.
+  seedLocal([stdioEntry('zzz.example/one')]);
+  const first = (sort) => market.searchCatalog('', { sort, limit: 3 }).results[0];
+  assert.equal(first('relevance').source, 'local', 'the default order leads with your own entries');
+  assert.equal(first('newest').source, 'registry', 'newest sorts by date, as it says');
+  assert.equal(first('name').source, 'registry', 'name sorts alphabetically, as it says');
+});
+
+test('uninstall prunes the package-manager link it leaves behind', () => {
+  seedRegistry();
+  seedLocal([stdioEntry('local.example/one')]);
+  const scope = join(home, '.dsh', 'profiles', 'desktop', 'node_modules', '@dsh-mcp-market');
+  const slug = market.slugFor('local.example/one');
+  mkdirSync(market.bundleDir(slug), { recursive: true });
+  mkdirSync(scope, { recursive: true });
+  symlinkSync(market.bundleDir(slug), join(scope, slug), 'junction');
+  const ghost = 'ghost-bundle-000000';
+  symlinkSync(join(market.MARKET_ROOT, ghost), join(scope, ghost), 'junction');
+
+  const pruned = market.pruneBundleLinks(ghost);
+  assert.equal(pruned.length, 1, 'exactly the dead link');
+  assert.equal(existsSync(join(scope, ghost)), false, 'the dead link is gone');
+  assert.equal(existsSync(join(scope, slug)), true, 'a bundle that is still installed keeps its link');
+});
+
+test('the installed list reports what the tool count means', async () => {
+  seedRegistry();
+  seedLocal([stdioEntry('local.example/one')]);
+  const slug = market.slugFor('local.example/one');
+  mkdirSync(market.bundleDir(slug), { recursive: true });
+  writeFileSync(join(market.bundleDir(slug), 'market.meta.json'), JSON.stringify({
+    registryName: 'local.example/one', registryVersion: '', slug, pkg: market.BUNDLE_PREFIX + slug,
+    rowId: 'mcp-' + slug, serverName: 'one', kind: 'stdio', source: 'local', configKeys: [],
+  }));
+
+  const routes = new Map();
+  const ctx = {
+    get(key) {
+      if (key === 'connection') return { fetch: { register(spec) { routes.set(spec.path, spec); } } };
+      if (key === 'tools') return { schemas: () => [] };   // the row is up but registered nothing
+      return undefined;
+    },
+  };
+  host.apply(ctx);
+  const response = await routes.get(host.MARKET_INSTALLED_PATH).fetch(new Request('http://local' + host.MARKET_INSTALLED_PATH));
+  const body = await response.json();
+  assert.equal(body.value.items[0].toolCount, 0);
+  assert.equal(body.value.items[0].toolState, 'none', 'zero tools is a state the UI can show, not silence');
+});
 test('a card carries the 自建 badge state', () => {
   seedRegistry();
   seedLocal([stdioEntry('vendor.example/one')]);
