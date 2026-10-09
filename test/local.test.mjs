@@ -354,6 +354,25 @@ test('the 自建 filter shows only local entries', () => {
   assert.equal(everything.results.filter((card) => card.source === 'local').length, 1);
 });
 
+test('the search route forwards the 自建 filter', async () => {
+  seedRegistry();
+  seedLocal([stdioEntry('local.example/one')]);
+  const routes = new Map();
+  const ctx = { get(key) { return key === 'connection' ? { fetch: { register(spec) { routes.set(spec.path, spec); } } } : undefined; } };
+  host.apply(ctx);
+
+  // Through the route, not just the function: the chip changed state and the list did not,
+  // because this half never read the parameter the other half had always been sending.
+  const filtered = await routes.get(host.MARKET_SEARCH_PATH).fetch(new Request('http://local' + host.MARKET_SEARCH_PATH + '?source=local'));
+  const filteredBody = await filtered.json();
+  assert.equal(filteredBody.value.total, 1);
+  assert.equal(filteredBody.value.results[0].name, 'local.example/one');
+
+  const all = await routes.get(host.MARKET_SEARCH_PATH).fetch(new Request('http://local' + host.MARKET_SEARCH_PATH));
+  const allBody = await all.json();
+  assert.equal(allBody.value.total, 2, 'no parameter still means everything');
+});
+
 test('a card carries the 自建 badge state', () => {
   seedRegistry();
   seedLocal([stdioEntry('vendor.example/one')]);

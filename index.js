@@ -719,6 +719,9 @@ function marketSearchResponse(request) {
   const installed = new Map(market.listInstalled().map((item) => [item.registryName, item]));
   const found = market.searchCatalog(params.get('q') || '', {
     kind: params.get('kind') || 'all',
+    // The provenance axis. The Client half has always sent it; this half simply never read
+    // it, so the 自建 chip changed the chip state and nothing else.
+    source: params.get('source') || 'all',
     sort: params.get('sort') || 'relevance',
     limit: Number(params.get('limit')),
     offset: Number(params.get('offset')),
