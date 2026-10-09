@@ -296,6 +296,52 @@ test('uninstalling a local entry takes the same path as a registry one', async (
   assert.equal(market.listInstalled().length, 0, 'and the manifest forgets it');
 });
 
+test('an entry whose values are all declared installs without a form', async () => {
+  seedRegistry();
+  seedLocal([
+    {
+      name: 'local.example/full', title: '全部已填',
+      install: {
+        kind: 'stdio', command: 'C:\\Windows\\py.exe', args: ['run.py'],
+        env: [{ name: 'PLAIN', value: 'a' }, { name: 'SECRET', value: 'sk-1', isSecret: true }],
+      },
+    },
+    {
+      name: 'local.example/partial', title: '缺一个',
+      install: {
+        kind: 'stdio', command: 'C:\\Windows\\py.exe', args: ['other.py'],
+        env: [{ name: 'PLAIN', value: 'a' }, { name: 'NEEDED', isRequired: true, isSecret: true }],
+      },
+    },
+  ]);
+
+  const runtimes = market.detectRuntimes();
+  const full = market.cardStateFor(market.findServer('local.example/full'), runtimes, new Map());
+  assert.equal(full.needsConfig, false, 'a declared value answers the field, secret or not');
+  const partial = market.cardStateFor(market.findServer('local.example/partial'), runtimes, new Map());
+  assert.equal(partial.needsConfig, true, 'the empty required secret still has to be asked for');
+
+  const routes = new Map();
+  const ctx = {
+    get(key) {
+      if (key === 'connection') return { fetch: { register(spec) { routes.set(spec.path, spec); } } };
+      if (key === 'pluginManager') return { async installBundle() { return { exitCode: 0 }; } };
+      return undefined;
+    },
+  };
+  host.apply(ctx);
+  const response = await routes.get(host.MARKET_INSTALL_PATH).fetch(new Request('http://local' + host.MARKET_INSTALL_PATH, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'local.example/full' }),
+  }));
+  assert.equal(response.status, 200, 'no config body is needed at all');
+
+  const patch = readFileSync(join(market.bundleDir(market.slugFor('local.example/full')), 'cordis.patch.yml'), 'utf8');
+  assert.match(patch, /PLAIN: "a"/);
+  assert.match(patch, /SECRET: "sk-1"/, 'the declared secret is written without asking');
+});
+
 test('the 自建 filter shows only local entries', () => {
   seedRegistry();
   seedLocal([stdioEntry('vendor.example/one')]);

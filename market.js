@@ -483,9 +483,12 @@ export function cardStateFor(server, runtimes, installed = new Map()) {
   const { options, blocked } = plansFor(server, runtimes);
   const plan = options[0];
   const manifest = installed.get(server.name) || null;
+  // A variable only needs the form when there is no value to use: a declared `value` in the
+  // local file — or a registry default — is already the answer, secret or not. Without this
+  // an entry whose secrets are all filled in still claimed 需密钥 and still showed a form.
   const needsConfig = plan === undefined
     ? false
-    : (plan.variables || []).some((variable) => variable.isRequired || variable.isSecret)
+    : (plan.variables || []).some((variable) => variable.default === '' && (variable.isRequired || variable.isSecret))
       || (plan.slots || []).some((slot) => slot.isRequired);
   return {
     installable: plan !== undefined,

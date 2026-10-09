@@ -691,13 +691,20 @@ window.__ModuleLoader__.load({
       return [item.command, ...(item.args || [])].filter((part) => part).join(' ');
     }
 
-    /** A plan's argv exactly as the local file wrote it, for the warning display. */
-    function rawArgvOf(option) {
-      if (option === null || option === undefined) return '';
-      const parts = (option.argv || []).map((entry) => (entry.kind === 'literal' ? entry.value : '<' + entry.name + '>'));
-      return option.kind === 'http' ? option.url : [option.command, ...parts].join(' ');
+    /**
+     * Whether installing this entry replaces an installed row with a different command.
+     *
+     * When it does, the replace block already shows both lines, so the plain command block
+     * is dropped: the same command must not be printed twice in one dialog.
+     */
+    function isReplacing(detail, option, argValues) {
+      if (detail === null || detail === undefined) return false;
+      if (detail.source !== 'local') return false;
+      if (option === undefined || option === null) return false;
+      const current = installedLineOf(detail);
+      return current !== '' && current !== commandLineOf(option, argValues);
     }
-/** The button state machine's state for one card. */
+
     function cardStateOf(card) {
       if (card.installedSlug) return card.updateAvailable ? 'update' : 'installed';
       if (!card.installable) return 'unavailable';
@@ -1186,37 +1193,6 @@ window.__ModuleLoader__.load({
             + (detail.coversVersion ? '（v' + detail.coversVersion + '）' : '') + '。')
           : null,
 
-        // Replacing an installed row changes what actually runs, so both command lines are
-        // shown side by side rather than only the new one.
-        detail && detail.installed && detail.source === 'local' && installedLineOf(detail) !== ''
-          && installedLineOf(detail) !== commandLineOf(option, argValues)
-          ? h('div', { className: 'mcpm-dialog mcpm-dialog--replace' },
-              h('div', { className: 'mcpm-note' }, '将替换已安装的注册表版本'),
-              h('div', { className: 'mcpm-field' },
-                h('span', { className: 'mcpm-field__label' }, '当前'),
-                h('pre', { className: 'mcpm-pre' }, installedLineOf(detail))),
-              h('div', { className: 'mcpm-field' },
-                h('span', { className: 'mcpm-field__label' }, '新装'),
-                h('pre', { className: 'mcpm-pre' }, commandLineOf(option, argValues))),
-            )
-          : null,
-
-        // A value that is already a secret in the file will be written to the profile as
-        // plain text; that is the same thing that happens to a registry entry's secret, and
-        // it is worth saying out loud before the click.
-        option && (option.variables || []).some((variable) => variable.isSecret && variable.default !== '')
-          ? h('div', { className: 'mcpm-error' }, '⚠️ 密钥将以明文写入 profile 的 cordis.patch.yml。')
-          : null,
-
-        // A flagged command line is shown verbatim: the decision belongs to the person who
-        // wrote the file, not to a heuristic.
-        detail && detail.warning
-          ? h('div', null,
-              h('div', { className: 'mcpm-error' }, '⚠️ 这条自建条目有可疑之处：'),
-              (detail.warningReasons || []).map((reason) => h('div', { key: reason, className: 'mcpm-note' }, '· ' + reason)),
-              h('pre', { className: 'mcpm-pre' }, rawArgvOf(option)))
-          : null,
-
         detail && detail.options.length === 0
           ? h('div', { className: 'mcpm-error' }, '这个条目在这台机器上没有可用的安装方式：' +
               (detail.blocked || []).map((item) => item.registryType + '（' + item.reason + '）').join('；'))
@@ -1232,10 +1208,38 @@ window.__ModuleLoader__.load({
             )
           : null,
 
+        // What will run, printed exactly once. Replacing an installed row shows both lines
+        // side by side and stands in for the plain block below it.
+        isReplacing(detail, option, argValues)
+          ? h('div', { className: 'mcpm-dialog mcpm-dialog--replace' },
+              h('div', { className: 'mcpm-note' }, '将替换已安装的注册表版本'),
+              h('div', { className: 'mcpm-field' },
+                h('span', { className: 'mcpm-field__label' }, '当前'),
+                h('pre', { className: 'mcpm-pre' }, installedLineOf(detail))),
+              h('div', { className: 'mcpm-field' },
+                h('span', { className: 'mcpm-field__label' }, '新装'),
+                h('pre', { className: 'mcpm-pre' }, commandLineOf(option, argValues))),
+            )
+          : option
+            ? h('div', null,
+                h('div', { className: 'mcpm-note' }, option.kind === 'http' ? '将连接到的地址' : '将执行的命令'),
+                h('pre', { className: 'mcpm-pre' }, commandLineOf(option, argValues)),
+              )
+            : null,
+
+        // Every risk in one place, above the form: the reader learns what this is, where it
+        // comes from and what it replaces before reading what it costs. The command line is
+        // not repeated here — it is already on screen one block up.
         option
           ? h('div', null,
-              h('div', { className: 'mcpm-note' }, option.kind === 'http' ? '将连接到的地址' : '将执行的命令'),
-              h('pre', { className: 'mcpm-pre' }, commandLineOf(option, argValues)),
+              (option.variables || []).some((variable) => variable.isSecret && variable.default !== '')
+                ? h('div', { className: 'mcpm-error' }, '⚠️ 密钥将以明文写入 profile 的 cordis.patch.yml。')
+                : null,
+              detail && detail.warning
+                ? h('div', null,
+                    h('div', { className: 'mcpm-error' }, '⚠️ 这条自建条目有可疑之处：'),
+                    (detail.warningReasons || []).map((reason) => h('div', { key: reason, className: 'mcpm-note' }, '· ' + reason)))
+                : null,
               h('div', { className: 'mcpm-note' }, '⚠️ ' + option.risk),
             )
           : null,
@@ -1257,7 +1261,11 @@ window.__ModuleLoader__.load({
 
         option && option.variables.length > 0
           ? h('div', null,
-              h('div', { className: 'mcpm-note' }, '需要填写'),
+              // The title tells the truth about what is left to do: an entry whose values are
+              // all declared in the file has nothing to fill in, only something to change.
+              h('div', { className: 'mcpm-note' }, option.variables.some((variable) => variable.default === '' && (variable.isRequired || variable.isSecret))
+                ? '需要填写'
+                : '配置（已有默认值，可改）'),
               option.variables.map((variable) => h('div', { key: variable.name, className: 'mcpm-field' },
                 h('label', { className: 'mcpm-field__label' }, variable.name, variable.isRequired ? h('span', { className: 'mcpm-required' }, ' *') : null),
                 h('input', {
