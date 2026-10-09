@@ -326,6 +326,45 @@ test('the card is dense and the progress line is not grey', () => {
   assert.match(source, /'全量重拉'/, 'the secondary action that starts it exists');
 });
 
+test('the search request carries the query and the paging', () => {
+  // The first screen loads with an empty query, so a broken query path stays invisible
+  // until someone actually searches. This locks the contract: whatever the box holds has
+  // to reach the request, along with the paging.
+  const urls = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    urls.push(String(url));
+    return { ok: true, status: 200, json: async () => ({ ok: true, value: { total: 0, results: [], offset: 0, limit: 60 } }) };
+  };
+  let clicked = false;
+  try {
+    const page = componentFor('main')({});
+    const walk = (element, depth = 0) => {
+      if (clicked || depth > 24 || element === null || element === undefined || typeof element !== 'object') return;
+      if (Array.isArray(element)) { for (const child of element) walk(child, depth + 1); return; }
+      const props = element.props || {};
+      // The steered pass puts `x/y` in the box, so the search button must send exactly that.
+      if (element.type === 'button' && typeof props.onClick === 'function' && props.className === 'mcpm-btn mcpm-btn--search') {
+        props.onClick();
+        clicked = true;
+        return;
+      }
+      if (typeof element.type === 'function') walk(element.type(props), depth + 1);
+      for (const child of element.children || []) walk(child, depth + 1);
+    };
+    walk(page);
+    assert.equal(clicked, true, 'the market must render a search button');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  assert.equal(urls.length > 0, true, 'pressing search must issue a request');
+  const sent = urls[urls.length - 1];
+  assert.match(sent, /q=x%2Fy/, 'the query must reach the request: ' + sent);
+  assert.match(sent, /limit=60/, 'the page size must reach the request');
+  assert.match(sent, /offset=0/, 'the offset must reach the request');
+});
+
 test('the class table defines every state hook the components use', () => {
   const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8');
   for (const selector of ['.mcpm-card', '.mcpm-grid', '.mcpm-btn--primary', '.mcpm-badge', '.mcpm-pager', '[data-state=']) {
