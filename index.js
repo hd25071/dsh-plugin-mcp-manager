@@ -843,6 +843,9 @@ async function marketInstallResponse(request, ctx) {
   }
 
   const serverName = market.serverNameFor(name, takenServerNames(ctx));
+  // What the bundle is written with. An mcpb plan replaces it below, once its manifest has
+  // been read — `args` itself is a const, which an earlier attempt here learned the hard way.
+  let installArgs = args;
   // An mcpb plan carries no command line: it lives in the package's manifest, which only
   // exists after the download. So the download happens here, inside the bundle directory the
   // install already owns, and its manifest decides what actually runs.
@@ -858,8 +861,8 @@ async function marketInstallResponse(request, ctx) {
       if (!mapped.ok) return failure('mcpb-manifest-rejected', mapped.reason, 400);
       plan.command = mapped.command;
       plan.env = mapped.env;
-      args = mapped.args;
-      mcpbInfo = { identifier: plan.identifier, bytes: fetched.bytes, entries: fetched.entries, entryPoint: mapped.entryPoint };
+      installArgs = mapped.args;
+      // A count, not the listing: the manifest is an audit record, and the entry names are noise.\n      mcpbInfo = { identifier: plan.identifier, bytes: fetched.bytes, entries: fetched.entries.length, entryPoint: mapped.entryPoint };
     } catch (error) {
       return failure('mcpb-install-crashed', `mcpb 安装过程出错：${String((error && error.message) || error)}`, 500);
     }
@@ -867,7 +870,7 @@ async function marketInstallResponse(request, ctx) {
 
   let written;
   try {
-    written = market.writeBundle({ slug, server, serverName, plan, args, config, argumentValues, mcpbInfo });
+    written = market.writeBundle({ slug, server, serverName, plan, args: installArgs, config, argumentValues, mcpbInfo });
   } catch (error) {
     return failure('write-failed', String((error && error.message) || error), 500);
   }
