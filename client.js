@@ -75,10 +75,12 @@ window.__ModuleLoader__.load({
 
     const marketStatus = () => call(MARKET_ROUTE);
     const marketInstalled = () => call(MARKET_INSTALLED_ROUTE);
-    const marketSearch = (q, kind, sort, offset) => {
+    const marketSearch = (q, kind, sort, offset, source) => {
       const params = new URLSearchParams();
       if (q) params.set('q', q);
       if (kind && kind !== 'all') params.set('kind', kind);
+      // `source` is the provenance axis (自建 vs 注册表), independent of the install form.
+      if (source === 'local') params.set('source', 'local');
       if (sort && sort !== 'relevance') params.set('sort', sort);
       params.set('limit', String(MARKET_PAGE_SIZE));
       params.set('offset', String(offset || 0));
@@ -561,6 +563,9 @@ window.__ModuleLoader__.load({
 .mcpm-badge--installed { color: var(--dsw-alias-state-success-primary, #22c55e); border-color: var(--dsw-alias-state-success-primary, #22c55e); }
 .mcpm-badge--unavailable { color: var(--dsw-alias-state-error-primary, #ef4444); }
 .mcpm-badge--more { color: var(--mcpm-muted); border-style: dashed; }
+/* A local entry is a different kind of thing from a registry one, so it says so. */
+.mcpm-badge--own { color: var(--dsw-alias-button-primary-fill, #0f1115); border-color: var(--dsw-alias-button-primary-fill, #0f1115); }
+.mcpm-dialog--replace { border-color: var(--dsw-alias-state-warn-primary, #f59e0b); }
 
 /* The sort control is a native select, out of step with the rounded chips and buttons. */
 .mcpm-select { border-radius: var(--mcpm-radius); padding: 3px 7px; border: .5px solid var(--mcpm-border-strong); background: transparent; color: inherit; }
@@ -678,7 +683,21 @@ window.__ModuleLoader__.load({
       );
     }
 
-    /** The button state machine's state for one card. */
+        /** The command line an already-installed row of this name runs. */
+    function installedLineOf(detail) {
+      const item = detail && detail.installed;
+      if (item === null || item === undefined) return '';
+      if (item.kind === 'http') return item.url || '';
+      return [item.command, ...(item.args || [])].filter((part) => part).join(' ');
+    }
+
+    /** A plan's argv exactly as the local file wrote it, for the warning display. */
+    function rawArgvOf(option) {
+      if (option === null || option === undefined) return '';
+      const parts = (option.argv || []).map((entry) => (entry.kind === 'literal' ? entry.value : '<' + entry.name + '>'));
+      return option.kind === 'http' ? option.url : [option.command, ...parts].join(' ');
+    }
+/** The button state machine's state for one card. */
     function cardStateOf(card) {
       if (card.installedSlug) return card.updateAvailable ? 'update' : 'installed';
       if (!card.installable) return 'unavailable';
@@ -748,7 +767,11 @@ window.__ModuleLoader__.load({
         h('p', { className: 'mcpm-card__desc' }, card.description || '（无描述）'),
         h('div', { className: 'mcpm-card__badges' },
           badgeItems([
-            h('span', { key: 'kind', className: 'mcpm-badge mcpm-badge--kind' }, card.registryType || (card.hasRemote ? 'remote' : '—')),
+            card.source === 'local' ? h('span', { key: 'own', className: 'mcpm-badge mcpm-badge--own' }, '自建') : null,
+            // For a local entry the provenance badge already says 自建, so this one shows the
+            // install form instead of repeating 'local'.
+            h('span', { key: 'kind', className: 'mcpm-badge mcpm-badge--kind' },
+              card.source === 'local' ? (card.planKind || 'local') : (card.registryType || (card.hasRemote ? 'remote' : '—'))),
             ...(card.kinds || []).map((kind) => h('span', { key: kind, className: 'mcpm-badge mcpm-badge--transport' }, transportLabelOf(kind))),
             // The button already says 已安装 ✓, so a 已装 badge would only repeat it.
             state === 'unavailable' ? h('span', { key: 'unavailable', className: 'mcpm-badge mcpm-badge--unavailable' }, '不可用') : null,
@@ -824,6 +847,8 @@ window.__ModuleLoader__.load({
       const [dialog, setDialog] = React.useState('');
       const [hint, setHint] = React.useState('');
       const [confirmFull, setConfirmFull] = React.useState(false);
+      // Provenance filter: 'all' or 'local' (自建). Separate from kind, which is the form.
+      const [source, setSource] = React.useState('all');
 
       const loadStatus = React.useCallback(async () => {
         try {
@@ -839,10 +864,10 @@ window.__ModuleLoader__.load({
           setError(String((e && e.message) || e));
         }
       }, []);
-      const runSearch = React.useCallback(async (q, k, s, p) => {
+      const runSearch = React.useCallback(async (q, k, s, p, src) => {
         setBusy('search');
         try {
-          setResults(await marketSearch(q, k, s, p * MARKET_PAGE_SIZE));
+          setResults(await marketSearch(q, k, s, p * MARKET_PAGE_SIZE, src));
         } catch (e) {
           setError(String((e && e.message) || e));
         } finally {
@@ -853,7 +878,7 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         loadStatus();
         loadInstalled();
-        runSearch('', 'all', 'relevance', 0);
+        runSearch('', 'all', 'relevance', 0, 'all');
       }, [loadStatus, loadInstalled, runSearch]);
 
       const refreshing = !!(status && status.refreshing && status.refreshing.running);
@@ -876,11 +901,13 @@ window.__ModuleLoader__.load({
         }
       };
 
-      const apply = (nextKind, nextSort, nextPage) => {
+      const apply = (nextKind, nextSort, nextPage, nextSource) => {
+        const src = nextSource === undefined ? source : nextSource;
         setKind(nextKind);
         setSort(nextSort);
         setPage(nextPage);
-        runSearch(query, nextKind, nextSort, nextPage);
+        setSource(src);
+        runSearch(query, nextKind, nextSort, nextPage, src);
       };
 
       /**
@@ -912,7 +939,7 @@ window.__ModuleLoader__.load({
         try {
           await marketUninstall(item.slug);
           await loadInstalled();
-          await runSearch(query, kind, sort, page);
+          await runSearch(query, kind, sort, page, source);
         } catch (e) {
           setError(String((e && e.message) || e));
         } finally {
@@ -934,28 +961,29 @@ window.__ModuleLoader__.load({
             placeholder: '搜索 MCP 服务器（名称 / 描述，本地搜索）',
             value: query,
             onChange: (event) => setQuery(event.target.value),
-            onKeyDown: (event) => { if (event.key === 'Enter') apply(kind, sort, 0); },
+            onKeyDown: (event) => { if (event.key === 'Enter') apply(kind, sort, 0, source); },
           }),
           h('div', { className: 'mcpm-filters' },
-            [['all', '全部'], ['local', '本地'], ['remote', '远程']].map(([value, label]) =>
+            // One dimension, four chips: 本地/远程 are the install form, 自建 is provenance.
+            [['all', '全部', 'all'], ['local', '本地', 'all'], ['remote', '远程', 'all'], ['own', '自建', 'local']].map(([value, label, src]) =>
               h('button', {
                 key: value,
                 type: 'button',
                 className: 'mcpm-chip',
-                'data-active': kind === value ? 'true' : 'false',
-                onClick: () => apply(value, sort, 0),
+                'data-active': (value === 'own' ? source === 'local' : source === 'all' && kind === value) ? 'true' : 'false',
+                onClick: () => apply(value === 'own' ? 'all' : value, sort, 0, src),
               }, label)),
           ),
           h('select', {
             className: 'mcpm-select',
             value: sort,
-            onChange: (event) => apply(kind, event.target.value, 0),
+            onChange: (event) => apply(kind, event.target.value, 0, source),
           },
             h('option', { value: 'relevance' }, '相关度'),
             h('option', { value: 'newest' }, '最新上架'),
             h('option', { value: 'name' }, '名称'),
           ),
-          h('button', { type: 'button', className: 'mcpm-btn mcpm-btn--search', 'data-state': 'idle', onClick: () => apply(kind, sort, 0) },
+          h('button', { type: 'button', className: 'mcpm-btn mcpm-btn--search', 'data-state': 'idle', onClick: () => apply(kind, sort, 0, source) },
             busy === 'search' ? '搜索中…' : '搜索'),
           h('button', { type: 'button', className: 'mcpm-btn', 'data-state': refreshing ? 'busy' : 'idle', disabled: refreshing, onClick: () => refresh('incremental'), title: '只拉取上次之后变更的条目，几秒钟' },
             refreshing ? '刷新中…' : '刷新目录'),
@@ -1004,7 +1032,7 @@ window.__ModuleLoader__.load({
           ? h(InstallDialog, {
               name: dialog,
               onClose: () => setDialog(''),
-              onDone: () => { loadInstalled(); loadStatus(); runSearch(query, kind, sort, page); },
+              onDone: () => { loadInstalled(); loadStatus(); runSearch(query, kind, sort, page, source); },
             })
           : null,
 
@@ -1144,11 +1172,50 @@ window.__ModuleLoader__.load({
           h('span', { className: 'mcpm-card__name' }, detail ? detail.server.title : name),
           h('span', { className: 'mcpm-badge' }, name),
           detail && detail.server.version ? h('span', { className: 'mcpm-badge' }, 'v' + detail.server.version) : null,
-          h('span', { className: 'mcpm-badge mcpm-badge--source' }, '来源：官方 MCP 注册表'),
+          h('span', { className: 'mcpm-badge mcpm-badge--source' },
+            detail && detail.source === 'local' ? '来源：自建（local-entries.json）' : '来源：官方 MCP 注册表'),
         ),
         detail && detail.server.description ? h('p', { className: 'mcpm-note' }, detail.server.description) : null,
         !detail && !error ? h('p', { className: 'mcpm-note' }, '读取安装方式…') : null,
         error ? h('div', { className: 'mcpm-error' }, error) : null,
+
+        // A local entry of the same name covers the registry one: say so before anything is
+        // written, because the row that comes out is not the row the registry describes.
+        detail && detail.coversRegistry
+          ? h('div', { className: 'mcpm-note' }, '该条目覆盖了注册表中的同名条目'
+            + (detail.coversVersion ? '（v' + detail.coversVersion + '）' : '') + '。')
+          : null,
+
+        // Replacing an installed row changes what actually runs, so both command lines are
+        // shown side by side rather than only the new one.
+        detail && detail.installed && detail.source === 'local' && installedLineOf(detail) !== ''
+          && installedLineOf(detail) !== commandLineOf(option, argValues)
+          ? h('div', { className: 'mcpm-dialog mcpm-dialog--replace' },
+              h('div', { className: 'mcpm-note' }, '将替换已安装的注册表版本'),
+              h('div', { className: 'mcpm-field' },
+                h('span', { className: 'mcpm-field__label' }, '当前'),
+                h('pre', { className: 'mcpm-pre' }, installedLineOf(detail))),
+              h('div', { className: 'mcpm-field' },
+                h('span', { className: 'mcpm-field__label' }, '新装'),
+                h('pre', { className: 'mcpm-pre' }, commandLineOf(option, argValues))),
+            )
+          : null,
+
+        // A value that is already a secret in the file will be written to the profile as
+        // plain text; that is the same thing that happens to a registry entry's secret, and
+        // it is worth saying out loud before the click.
+        option && (option.variables || []).some((variable) => variable.isSecret && variable.default !== '')
+          ? h('div', { className: 'mcpm-error' }, '⚠️ 密钥将以明文写入 profile 的 cordis.patch.yml。')
+          : null,
+
+        // A flagged command line is shown verbatim: the decision belongs to the person who
+        // wrote the file, not to a heuristic.
+        detail && detail.warning
+          ? h('div', null,
+              h('div', { className: 'mcpm-error' }, '⚠️ 这条自建条目有可疑之处：'),
+              (detail.warningReasons || []).map((reason) => h('div', { key: reason, className: 'mcpm-note' }, '· ' + reason)),
+              h('pre', { className: 'mcpm-pre' }, rawArgvOf(option)))
+          : null,
 
         detail && detail.options.length === 0
           ? h('div', { className: 'mcpm-error' }, '这个条目在这台机器上没有可用的安装方式：' +
@@ -1195,7 +1262,11 @@ window.__ModuleLoader__.load({
                 h('label', { className: 'mcpm-field__label' }, variable.name, variable.isRequired ? h('span', { className: 'mcpm-required' }, ' *') : null),
                 h('input', {
                   type: variable.isSecret ? 'password' : 'text',
-                  placeholder: variable.default || (variable.isRequired ? '必填' : '可留空'),
+                  // A value declared in the file is already answered: show it masked and
+                  // editable, and say where it came from rather than repeating the value.
+                  placeholder: variable.default === ''
+                    ? (variable.isRequired ? '必填' : '可留空')
+                    : (detail && detail.source === 'local' ? '已在 local-entries.json 中定义' : variable.default),
                   value: values[variable.name] === undefined ? '' : values[variable.name],
                   onChange: (event) => setValues((current) => ({ ...current, [variable.name]: event.target.value })),
                 }),
