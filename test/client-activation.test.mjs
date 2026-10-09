@@ -12,14 +12,15 @@
  * way back is the "remove third-party plugins and restart" recovery, which
  * discards `dsh.profile.bundles` and the user's whole `cordis.patch.yml` layer.
  *
- * The specific defect this pins down: Cordis resolves a service only along the
- * plugin's injected ancestry, so a plain `ctx.foo` read for anything missing
- * from `inject` **throws** (`cannot get property "foo" without inject`) rather
- * than yielding undefined — and a guard like `ctx.foo || null` therefore never
- * runs. Optional services must be read with `ctx.get(name)`.
+ * The defect this pins down: Cordis resolves a service only along the plugin's
+ * injected ancestry, so a plain `ctx.foo` read for anything missing from
+ * `inject` **throws** (`cannot get property "foo" without inject`) rather than
+ * yielding undefined — a guard like `ctx.foo || null` therefore never runs.
+ * Optional services are acquired with `ctx.inject(names, scope => …)`, which
+ * activates the child scope only when every named service exists.
  *
- * The context below reproduces that rule, so this test fails loudly if a bare
- * service property read ever comes back.
+ * The context below reproduces both rules, so this test fails loudly if either
+ * regresses.
  */
 
 import assert from 'node:assert/strict';
@@ -52,14 +53,22 @@ function reactShim() {
 }
 
 /**
- * Load the bundle and return its exports plus what it registered.
+ * Load the bundle and return its exports plus everything it did.
  *
  * @param options - test seams.
- * @param options.services - what `ctx.get` resolves.
+ * @param options.services - what the context provides.
+ * @param options.registerThrows - make the tab-type registration throw.
  * @returns the captured state.
  */
 function load(options = {}) {
-  const calls = { injections: [], registrations: [], effects: [] };
+  const calls = {
+    slotInjections: [],
+    slotRegistrations: [],
+    effects: [],
+    injectNames: [],
+    scopes: [],
+    tabTypes: []
+  };
   let registered;
 
   const windowStub = {
@@ -74,10 +83,9 @@ function load(options = {}) {
     body: { appendChild() {}, removeChild() {} },
     createElement: () => ({ style: {}, dataset: {}, remove() {}, appendChild() {}, setAttribute() {} })
   };
-  const navigatorStub = { clipboard: { writeText: async () => {} } };
 
   const run = new Function('window', 'document', 'navigator', 'fetch', 'console', SOURCE);
-  run(windowStub, documentStub, navigatorStub, async () => new Response('{"ok":true,"value":{}}', { status: 200 }), {
+  run(windowStub, documentStub, { clipboard: { writeText: async () => {} } }, async () => new Response('{"ok":true,"value":{}}', { status: 200 }), {
     warn() {},
     error() {},
     log() {}
@@ -89,26 +97,56 @@ function load(options = {}) {
     return reactShim();
   });
 
-  const services = options.services ?? {};
-  const base = {
-    get(name) {
-      return services[name];
+  const slots = {
+    inject(name, callback) {
+      calls.slotInjections.push(name);
+      callback();
+      return () => {};
     },
-    effect(fn) {
-      calls.effects.push(fn);
-      const dispose = fn();
-      return typeof dispose === 'function' ? dispose : () => {};
-    },
-    slots: {
-      inject(name, callback) {
-        calls.injections.push(name);
-        callback();
+    register(definition, component) {
+      calls.slotRegistrations.push({ name: definition.name, key: definition.key, component });
+      return { definition };
+    }
+  };
+  const effect = (fn) => {
+    calls.effects.push(fn);
+    const dispose = fn();
+    return typeof dispose === 'function' ? dispose : () => {};
+  };
+
+  const services = {
+    // The right dock, as shipped by dsh-client-ui-sidebar-browser.
+    sidebarRight: { openTab: () => {}, openTabs: { getSnapshot: () => [] } },
+    sidebarRightTabs: {
+      register(definition) {
+        calls.tabTypes.push(definition);
+        if (options.registerThrows === true) throw new Error('tab type rejected');
         return () => {};
-      },
-      register(definition, component) {
-        calls.registrations.push({ name: definition.name, key: definition.key, component });
-        return { definition };
       }
+    },
+    ...(options.services ?? {})
+  };
+  // `null` means "this service is not mounted", which is how a caller removes one.
+  for (const [name, value] of Object.entries(services)) {
+    if (value === null) delete services[name];
+  }
+
+  const base = {
+    effect,
+    slots,
+    /**
+     * Cordis's `ctx.inject`: run the callback in a child scope once every named
+     * service exists, and never otherwise.
+     */
+    inject(names, callback) {
+      calls.injectNames.push(names);
+      const missing = names.filter((name) => services[name] === undefined);
+      if (missing.length > 0) return () => {};
+      const scope = { effect, slots };
+      for (const name of names) scope[name] = services[name];
+      calls.scopes.push(scope);
+      const dispose = callback(scope);
+      return typeof dispose === 'function' ? dispose : () => {};
     }
   };
 
@@ -131,44 +169,60 @@ test('the factory id and export shape match the manifest', () => {
 });
 
 test('apply() survives a context that throws on any non-injected service read', () => {
-  const { exports, ctx } = load({ services: { sidebarRight: { openTab() {} } } });
+  const { exports, ctx } = load();
   // A throw here is what produces "web boot: 1 entry did not activate".
   assert.doesNotThrow(() => exports.apply(ctx));
 });
 
-test('the right-dock service is absent: the bundle still activates', () => {
-  const { exports, ctx, calls } = load({ services: {} });
-  assert.doesNotThrow(() => exports.apply(ctx));
-  // The call-log tab is optional, so nothing is registered for it.
-  assert.equal(calls.effects.length, 0);
-  assert.ok(calls.injections.includes('plugins.bundle.config'));
-  assert.ok(calls.injections.includes('sidebar.right.pane.tab'));
-});
-
-test('a right-dock service that throws on register is contained', () => {
-  const { exports, ctx } = load({
-    services: {
-      sidebarRight: { openTab() {} },
-      sidebarRightTabs: {
-        register() {
-          throw new Error('right dock is not mounted');
-        }
-      }
-    }
-  });
-  assert.doesNotThrow(() => exports.apply(ctx), 'an optional integration must not fail the boot');
-});
-
 test('the manager page registers on the bundle key the Plugins page dispatches', () => {
-  const { exports, ctx, calls } = load({ services: {} });
+  const { exports, ctx, calls } = load();
   exports.apply(ctx);
-  const page = calls.registrations.find((entry) => entry.name === 'plugins.bundle.config');
+  const page = calls.slotRegistrations.find((entry) => entry.name === 'plugins.bundle.config');
   assert.ok(page !== undefined, 'the manager page is contributed');
   assert.equal(page.key, MANIFEST.name, 'keyed by the bundle package name');
   assert.equal(typeof page.component, 'function');
 });
 
-test('no bare service property is read outside ctx.get', () => {
+test('the right dock present: the tab type, the pane body and the title all register', () => {
+  const { exports, ctx, calls } = load();
+  exports.apply(ctx);
+
+  assert.deepEqual(calls.injectNames, [['sidebarRight', 'sidebarRightTabs']]);
+  assert.equal(calls.scopes.length, 1, 'the child scope activates');
+
+  const [tabType] = calls.tabTypes;
+  assert.ok(tabType !== undefined, 'a right-dock tab type is registered');
+  assert.equal(tabType.id, MANIFEST.name);
+  assert.equal(typeof tabType.kind, 'string');
+  assert.equal(typeof tabType.title, 'function');
+  assert.equal(tabType.keepMounted, true);
+
+  const pane = calls.slotRegistrations.find((entry) => entry.name === 'sidebar.right.pane.tab');
+  const title = calls.slotRegistrations.find((entry) => entry.name === 'sidebar.right.pane.tab.title');
+  assert.ok(pane !== undefined, 'the pane body is registered');
+  assert.ok(title !== undefined, 'the pane title is registered');
+  // Both are keyed by the tab type's id, as the shipped browser tab does.
+  assert.equal(pane.key, MANIFEST.name);
+  assert.equal(title.key, MANIFEST.name);
+});
+
+test('the right dock absent: the bundle still activates and registers no tab', () => {
+  const { exports, ctx, calls } = load({ services: { sidebarRight: null, sidebarRightTabs: null } });
+  assert.doesNotThrow(() => exports.apply(ctx));
+  assert.equal(calls.scopes.length, 0, 'the child scope never activates');
+  assert.equal(calls.tabTypes.length, 0);
+  // The manager page is unconditional.
+  assert.ok(calls.slotRegistrations.some((entry) => entry.name === 'plugins.bundle.config'));
+});
+
+test('a tab type the shell refuses costs the tab, not the boot', () => {
+  const { exports, ctx, calls } = load({ registerThrows: true });
+  assert.doesNotThrow(() => exports.apply(ctx), 'an optional integration must not fail the boot');
+  assert.equal(calls.tabTypes.length, 1, 'the attempt was made and contained');
+  assert.ok(calls.slotRegistrations.some((entry) => entry.name === 'plugins.bundle.config'));
+});
+
+test('no bare service property is read outside an injected scope', () => {
   // A guard such as `ctx.sidebarRight || null` reads like a null check but
   // throws before it can run, so the bundle must never do it. Comments are
   // removed first, because the explanation of this rule names the pattern.
@@ -176,5 +230,5 @@ test('no bare service property is read outside ctx.get', () => {
   const reads = [...code.matchAll(/\bctx\.([A-Za-z_$][A-Za-z0-9_$]*)/g)].map((match) => match[1]);
   const allowed = new Set(['get', 'effect', 'slots', 'inject', 'on', 'provide']);
   const offenders = [...new Set(reads)].filter((name) => !allowed.has(name));
-  assert.deepEqual(offenders, [], `read these with ctx.get(name) instead: ${offenders.join(', ')}`);
+  assert.deepEqual(offenders, [], `read these through ctx.inject/ctx.get instead: ${offenders.join(', ')}`);
 });

@@ -25,6 +25,9 @@ window.__ModuleLoader__.load({
     /** The right-dock tab type this bundle contributes. */
     const CALLS_KIND = 'mcp-manager-calls';
 
+    /** Label of the call-log tab, in the tab strip and the tab-type menu. */
+    const CALLS_TITLE = 'MCP 调用记录';
+
     // ------------------------------------------------------------------ transport
 
     async function call(route, init) {
@@ -430,28 +433,21 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /**
+     * Label of one call-log tab in the right dock.
+     *
+     * The slot passes `useTabInfo` and `useStore` hooks; the label is static, so
+     * neither is needed here.
+     *
+     * @returns the tab title.
+     */
+    function CallsTitle() {
+      return h('span', null, CALLS_TITLE);
+    }
+
     return {
       inject: ['slots'],
       apply(ctx) {
-        /**
-         * Read an optional Client service.
-         *
-         * Cordis resolves a service only along the plugin's own injected ancestry,
-         * so a plain `ctx.foo` for anything missing from `inject` THROWS
-         * ("cannot get property \"foo\" without inject") instead of yielding
-         * undefined. An exception thrown from `apply` does not just disable this
-         * bundle: the Web shell reports `web boot: 1 entry did not activate` and
-         * refuses to boot at all. `ctx.get(name)` is the documented reader for an
-         * optional service and returns undefined instead.
-         */
-        const service = (name) => {
-          try {
-            return typeof ctx.get === 'function' ? ctx.get(name) : undefined;
-          } catch {
-            return undefined;
-          }
-        };
-
         // The manager page lives on this bundle's own page in the Plugins page.
         ctx.slots.inject('plugins.bundle.config', () =>
           ctx.slots.register({
@@ -461,26 +457,41 @@ window.__ModuleLoader__.load({
           }, Panel));
 
         // The call log is an optional page in the right dock: one tab type, plus the
-        // body registered under that type's id. Best-effort by design — a missing or
-        // renamed right-dock service must degrade to "no call-log tab", never to a
-        // failed boot — so it reads through `service()` and is guarded as a whole.
-        try {
-          dock.sidebarRight = service('sidebarRight') || null;
-          const tabs = service('sidebarRightTabs');
-          if (tabs && typeof tabs.register === 'function') {
-            ctx.effect(() => tabs.register({
-              id: BUNDLE,
-              kind: CALLS_KIND,
-              title: () => 'MCP 调用记录',
-              keepMounted: true,
-            }));
-          }
-        } catch (error) {
-          console.warn('[mcp-manager] right-dock integration unavailable:', error);
-        }
-
-        ctx.slots.inject('sidebar.right.pane.tab', () =>
-          ctx.slots.register({ name: 'sidebar.right.pane.tab', key: BUNDLE }, CallsPanel));
+        // body and the title registered under that type's id.
+        //
+        // `sidebarRight` and `sidebarRightTabs` are shipped by
+        // dsh-client-ui-sidebar-browser and are absent when the right dock is not
+        // mounted, so they are acquired through `ctx.inject`: the child scope
+        // activates when they appear and simply never activates when they do not.
+        // A plain property read would THROW — Cordis resolves only injected
+        // services — and a throw from `apply()` fails the whole web boot rather
+        // than just this bundle.
+        ctx.inject(['sidebarRight', 'sidebarRightTabs'], (scope) => {
+          dock.sidebarRight = scope.sidebarRight;
+          scope.effect(() => {
+            try {
+              return scope.sidebarRightTabs.register({
+                id: BUNDLE,
+                kind: CALLS_KIND,
+                multiple: false,
+                title: () => CALLS_TITLE,
+                keepMounted: true,
+              });
+            } catch (error) {
+              // A tab type this shell refuses must cost the call-log tab, never the boot.
+              console.warn('[mcp-manager] call-log tab type rejected:', error);
+              return undefined;
+            }
+          });
+          scope.effect(() => scope.slots.inject('sidebar.right.pane.tab', () => scope.slots.register({
+            name: 'sidebar.right.pane.tab',
+            key: BUNDLE,
+          }, CallsPanel)));
+          scope.effect(() => scope.slots.inject('sidebar.right.pane.tab.title', () => scope.slots.register({
+            name: 'sidebar.right.pane.tab.title',
+            key: BUNDLE,
+          }, CallsTitle)));
+        });
       },
     };
   },
