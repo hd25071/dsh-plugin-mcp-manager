@@ -1,0 +1,177 @@
+// The market routes, driven through a fake connection service.
+//
+// The fake pluginManager records install/remove calls, so the install path is asserted
+// end to end: generated files on disk, then the sanctioned installer invoked with them.
+import { test, beforeEach } from 'node:test';
+import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const home = mkdtempSync(join(tmpdir(), 'mcp-routes-'));
+process.env.USERPROFILE = home;
+process.env.HOME = home;
+
+const host = await import('../index.js');
+const market = await import('../market.js');
+
+// Each test starts from an empty market root, so installed-count assertions mean what
+// they say instead of depending on the order the tests ran in.
+beforeEach(() => {
+  rmSync(market.MARKET_ROOT, { recursive: true, force: true });
+});
+
+/** A cache with two entries: one npm, one remote-only. */
+function seedCache() {
+  mkdirSync(market.MARKET_ROOT, { recursive: true });
+  writeFileSync(market.CACHE_PATH, JSON.stringify({
+    fetchedAt: new Date().toISOString(),
+    count: 2,
+    servers: [
+      {
+        name: 'vendor.example/notes', title: 'Vendor Notes', description: 'npm based', version: '6.3.0',
+        publishedAt: '2026-02-02T00:00:00Z', remotes: [],
+        packages: [{
+          registryType: 'npm', identifier: '@example/notes-mcp', version: '6.3.0', transport: 'stdio',
+          environmentVariables: [{ name: 'EXAMPLE_API_KEY', description: 'key', isRequired: true, isSecret: true, default: '' }],
+          packageArguments: [],
+        }],
+      },
+      {
+        name: 'vendor.example/mcp', title: 'Vendor HTTP', description: 'remote only', version: '1.0.0',
+        publishedAt: '2026-01-01T00:00:00Z', packages: [],
+        remotes: [{ type: 'streamable-http', url: 'https://vendor.example/mcp', headers: [] }],
+      },
+    ],
+  }));
+}
+
+/** A context with a recording connection and a recording plugin manager. */
+function makeCtx() {
+  const routes = new Map();
+  const calls = { install: [], remove: [] };
+  const ctx = {
+    get(key) {
+      if (key === 'connection') return { fetch: { register(spec) { routes.set(spec.path, spec); } } };
+      if (key === 'pluginManager') {
+        return {
+          async installBundle(spec, options) { calls.install.push({ spec, options }); return { exitCode: 0 }; },
+          async removeBundle(name) { calls.remove.push(name); return { exitCode: 0 }; },
+        };
+      }
+      return undefined;
+    },
+  };
+  host.apply(ctx);
+  return { routes, calls };
+}
+
+async function call(routes, path, url, init) {
+  const spec = routes.get(path);
+  const response = await spec.fetch(new Request('http://local' + url, init));
+  return { status: response.status, body: await response.json() };
+}
+
+const post = (payload) => ({ method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+
+test('the market routes are all registered', () => {
+  seedCache();
+  const { routes } = makeCtx();
+  for (const path of [host.MARKET_PATH, host.MARKET_SEARCH_PATH, host.MARKET_DETAIL_PATH, host.MARKET_INSTALLED_PATH, host.MARKET_REFRESH_PATH, host.MARKET_INSTALL_PATH, host.MARKET_UNINSTALL_PATH]) {
+    assert.equal(routes.has(path), true, path + ' must be registered');
+  }
+  assert.deepEqual(routes.get(host.MARKET_INSTALL_PATH).methods, ['POST']);
+  assert.deepEqual(routes.get(host.MARKET_PATH).methods, ['GET', 'HEAD']);
+});
+
+test('status, search and detail answer from the cached snapshot', async () => {
+  seedCache();
+  const { routes } = makeCtx();
+
+  const status = await call(routes, host.MARKET_PATH, host.MARKET_PATH);
+  assert.equal(status.status, 200);
+  assert.equal(status.body.value.count, 2);
+  assert.equal(status.body.value.source, 'cache');
+
+  const search = await call(routes, host.MARKET_SEARCH_PATH, host.MARKET_SEARCH_PATH + '?q=notes');
+  assert.equal(search.body.value.total, 1);
+  assert.equal(search.body.value.results[0].name, 'vendor.example/notes');
+
+  const detail = await call(routes, host.MARKET_DETAIL_PATH, host.MARKET_DETAIL_PATH + '?name=' + encodeURIComponent('vendor.example/notes'));
+  assert.equal(detail.body.value.options.length, 1);
+  assert.equal(detail.body.value.options[0].kind, 'stdio');
+  assert.equal(detail.body.value.serverName.length > 0, true);
+
+  const missing = await call(routes, host.MARKET_DETAIL_PATH, host.MARKET_DETAIL_PATH + '?name=nope');
+  assert.equal(missing.status, 404);
+  assert.equal(missing.body.error.code, 'not-found');
+});
+
+test('install writes the bundle and hands it to the official installer', async () => {
+  seedCache();
+  const { routes, calls } = makeCtx();
+
+  const installed = await call(routes, host.MARKET_INSTALL_PATH, host.MARKET_INSTALL_PATH,
+    post({ name: 'vendor.example/notes', optionIndex: 0, config: { EXAMPLE_API_KEY: 'abc123', UNDECLARED: 'dropped' } }));
+  assert.equal(installed.status, 200);
+  assert.equal(calls.install.length, 1, 'the official installer must be the one that changes the profile');
+  assert.equal(calls.install[0].spec, installed.body.value.dir);
+  assert.equal(calls.install[0].options.activateNewBundles, true);
+  assert.equal(existsSync(join(installed.body.value.dir, 'cordis.patch.yml')), true);
+
+  const patch = readFileSync(join(installed.body.value.dir, 'cordis.patch.yml'), 'utf8');
+  assert.match(patch, /EXAMPLE_API_KEY: "abc123"/);
+  assert.doesNotMatch(patch, /UNDECLARED/, 'a variable the entry never declared must not reach the row');
+
+  const meta = JSON.parse(readFileSync(join(installed.body.value.dir, 'market.meta.json'), 'utf8'));
+  assert.deepEqual(meta.configKeys, ['EXAMPLE_API_KEY']);
+
+  // Reinstalling the same entry is an update, not a second copy.
+  const again = await call(routes, host.MARKET_INSTALL_PATH, host.MARKET_INSTALL_PATH,
+    post({ name: 'vendor.example/notes', optionIndex: 0, config: { EXAMPLE_API_KEY: 'abc123' } }));
+  assert.equal(again.body.value.slug, installed.body.value.slug);
+  assert.equal(again.body.value.reinstalled, true);
+  assert.equal(market.listInstalled().filter((item) => item.registryName === 'vendor.example/notes').length, 1);
+
+  const listed = await call(routes, host.MARKET_INSTALLED_PATH, host.MARKET_INSTALLED_PATH);
+  assert.equal(listed.body.value.count, 1);
+  assert.equal(listed.body.value.items[0].registryName, 'vendor.example/notes');
+  assert.equal(typeof listed.body.value.items[0].state, 'string');
+});
+
+test('a required variable with no value is refused before anything is written', async () => {
+  seedCache();
+  const { routes, calls } = makeCtx();
+  const refused = await call(routes, host.MARKET_INSTALL_PATH, host.MARKET_INSTALL_PATH,
+    post({ name: 'vendor.example/notes', optionIndex: 0, config: {} }));
+  assert.equal(refused.status, 400);
+  assert.equal(refused.body.error.code, 'missing-config');
+  assert.equal(calls.install.length, 0);
+  assert.equal(market.listInstalled().length, 0, 'nothing may be written when the install is refused');
+});
+
+test('uninstall removes the bundle first and the directory after', async () => {
+  seedCache();
+  const { routes, calls } = makeCtx();
+  const installed = await call(routes, host.MARKET_INSTALL_PATH, host.MARKET_INSTALL_PATH,
+    post({ name: 'vendor.example/mcp', optionIndex: 0, config: {} }));
+  const slug = installed.body.value.slug;
+
+  const removed = await call(routes, host.MARKET_UNINSTALL_PATH, host.MARKET_UNINSTALL_PATH, post({ slug }));
+  assert.equal(removed.status, 200);
+  assert.deepEqual(calls.remove, [market.BUNDLE_PREFIX + slug]);
+  assert.equal(existsSync(installed.body.value.dir), false);
+  assert.equal(market.listInstalled().length, 0);
+
+  const again = await call(routes, host.MARKET_UNINSTALL_PATH, host.MARKET_UNINSTALL_PATH, post({ slug }));
+  assert.equal(again.status, 404);
+});
+
+test('without the plugin manager the install routes degrade instead of throwing', async () => {
+  seedCache();
+  const routes = new Map();
+  host.apply({ get(key) { return key === 'connection' ? { fetch: { register(spec) { routes.set(spec.path, spec); } } } : undefined; } });
+  const refused = await call(routes, host.MARKET_INSTALL_PATH, host.MARKET_INSTALL_PATH, post({ name: 'vendor.example/notes' }));
+  assert.equal(refused.status, 503);
+  assert.equal(refused.body.error.code, 'service-unavailable');
+});

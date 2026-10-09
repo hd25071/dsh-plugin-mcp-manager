@@ -37,6 +37,10 @@ DSH 44.0.0 没有"MCP 管理器"页面（`dsh-client-ui-*` 的 48 个包里没�
 | ✅ | **恢复默认** | 移除该行的 profile 覆盖项，回到组合包声明的值（不是填一份副本） |
 | ✅ | **启停** | 逐行启用/停用（写 `disabled` 覆盖） |
 | ✅ | **调用记录** | **右侧停靠栏里的独立页**：按会话列出每次 `mcp__*` 调用 —— 工具名、所属服务器、参数摘要、**耗时**、结果规模、成功/失败，点开看完整记录 |
+| ✅ | **MCP 市场** | 从**官方 MCP 注册表**（`registry.modelcontextprotocol.io`）拉全量快照到本地，**本地搜索/筛选/排序**；点「安装」即生成组合包并调官方安装接口落地成一行 MCP |
+| ✅ | **安装即配置** | 按 registry 的 `environmentVariables`（`isRequired`/`isSecret`/默认值）自动生成表单；安装前**明文展示将执行的命令或 URL**、要哪些密钥、来源与风险 |
+| ✅ | **安装后自检** | 已装列表显示该行的**实时状态**（运行中/启动失败+错误原文），并在能读到工具清单时显示「✓ N 个工具」 |
+| ✅ | **卸载 / 更新** | 卸载先走官方 `removeBundle` 再删生成目录；同一条目重复安装走**覆盖更新**，并对比 registry 版本提示「有新版」 |
 
 ## 它是怎么工作的
 
@@ -46,7 +50,7 @@ package.json
   dsh.client        → client.js          浏览器半侧，注册进插件页的 plugins.bundle.config slot
 ```
 
-**Host 半侧**注册六个精确的 Fetch 路由，**浏览器半侧**用文档相对路径 `fetch()` 调用：
+**Host 半侧**注册十三个精确的 Fetch 路由，**浏览器半侧**用文档相对路径 `fetch()` 调用：
 
 | 路由 | 方法 | 作用 |
 | --- | --- | --- |
@@ -55,16 +59,50 @@ package.json
 | `api/mcp-manager/enabled` | POST | 启停一行（`{id, enabled}`） |
 | `api/mcp-manager/sessions` | GET | 会话列表（`listSessions()`，最新在前，带 live/persisted） |
 | `api/mcp-manager/calls` | GET | 某个会话的 MCP 调用记录（`?sessionId=&limit=`，缺省取最新会话） |
+| `api/mcp-manager/market` | GET | 目录状态：条数、更新时间、是否过期、**刷新进度**、本机运行时（npx/uvx/docker）、缓存路径 |
+| `api/mcp-manager/market/refresh` | POST | 启动一次全量拉取（后台跑，立即返回；前端轮询上面的状态） |
+| `api/mcp-manager/market/search` | GET | **本地**搜索：`?q=&kind=all\|local\|remote&sort=relevance\|newest\|name&limit=&offset=` |
+| `api/mcp-manager/market/detail` | GET | 一个条目的全部安装方式（`?name=`）+ 需要填的变量 + 风险说明 |
+| `api/mcp-manager/market/install` | POST | 安装：`{name, optionIndex, config}` → 写组合包 → `pluginManager.installBundle()` |
+| `api/mcp-manager/market/uninstall` | POST | 卸载：`{slug}` → `removeBundle()` → 删生成目录 |
+| `api/mcp-manager/market/installed` | GET | 已装列表：manifest + 行实时状态 + 工具数 + 是否有新版 |
 | `api/mcp-manager/health` | GET | 诊断：本 profile 挂了哪些服务 |
 
-### 两个界面分别挂在哪
+### 市场是怎么落地的（设计要点）
 
-| 界面 | 位置 | 注册方式 |
-| --- | --- | --- |
-| MCP 行总览 + 配置编辑 | 插件页里本组合包自己的页面 | `plugins.bundle.config`（key = 包名，`view: 'page'`） |
-| 调用记录 | **右侧停靠栏的独立页**（和文件树/终端并列） | 两步：`ctx.sidebarRightTabs.register({id, kind, title, keepMounted})` + `ctx.slots.register({name:'sidebar.right.pane.tab', key: <type id>}, Body)` |
+```text
+官方 registry ──全量拉取(~200 页 / ~20k 条 / ~100 秒, 后台跑)──▶ ~/.dsh/mcp-servers/market-cache.json
+                                                                        │  本地搜索，永不联网
+                    点「安装」                                          ▼
+   ~/.dsh/mcp-servers/<slug>/{package.json, cordis.patch.yml, market.meta.json}
+                                    │
+                                    ▼  pluginManager.installBundle(<绝对路径>)
+                        profile 多一条依赖 + 组合包 → 一条 dsh-mcp-client 行
+```
 
-调用记录页默认选**最新会话**，也可以在下拉里换会话；插件页上的「调用记录」按钮会把它打开（`ctx.sidebarRight.openTab(kind)`）。
+- **快照而非边搜边请求**：registry 全量只有几千个唯一 server，一次拉完落一个 JSON（实测 3.3 MB），
+  搜索/筛选/排序全在本地做（**实测 4–14 ms**），天然离线可用，也不受 registry 限流影响。
+  TTL 24h + 手动「刷新目录」；刷新失败保留旧快照并标注「离线数据，更新于 xx」。
+- **只保留 `isLatest` 且 `status === 'active'`**：registry 每个版本一条记录，不过滤会出现大量重复行。
+- **安装走官方接口**：生成的组合包是**真包**（`dsh.bundle.patch` 指向它的 patch），
+  所以用 `pluginManager.installBundle(绝对路径)` 完成 profile 变更 —— 依赖、组合包选择、软链都由 DSH 自己写，
+  而不是本插件绕过管理器去改 profile 配置。卸载同理先 `removeBundle` 再删目录（顺序反了会留下指向空目录的依赖）。
+- **`market.meta.json` 是关键件**：已装列表、版本对比、卸载清理都读它，不靠扫目录猜。
+
+### registry 条目 → MCP 行的映射
+
+| registry 字段 | 生成 |
+| --- | --- |
+| `packages[].registryType === 'npm'` | stdio 行：`<node.exe> <npm>/bin/npx-cli.js -y <identifier> [packageArguments]` |
+| `packages[].registryType === 'pypi'` | stdio 行：`uvx <identifier>`（本机没装 uv 时标记为不可用并说明原因） |
+| `packages[].registryType === 'oci'` | 标记「容器方式二期支持」 |
+| 只有 `remotes[]` | http 行：`transport: streamable-http` + `url`（`sse` 暂不支持） |
+| `packages[].environmentVariables[]` | 安装表单的 schema（`name`/`description`/`isRequired`/`isSecret`/默认值），填完写进行 `env` |
+| `remotes[].headers[]` | http 行的 `headers`（同上） |
+
+**为什么 npm 包不用 `command: npx`**：MCP SDK 的 `StdioClientTransport` 用 **`shell: false`** 起进程，
+而 Windows 上 `npx` 是 `.cmd` 垫片 —— 无 shell 直接执行 `.cmd` 会被 Node 拒绝，所以一律用
+`node.exe + npm/bin/npx-cli.js`（不依赖 PATH，也不经 cmd 引号地狱）。实测 `npx --version` → 11.19.0。
 
 三条实现约束（都是踩过的）：
 
@@ -76,6 +114,8 @@ package.json
    服务不存在时返回 `undefined` 而不是抛错 —— 所以每个路由都能降级成可诊断的 HTTP 状态，而不是把页面弄崩。
 3. **配置编辑的 `change` 是函数**：`configEditor.edit(entry, (current, inherited) => next)`。
    当 `next` 与 `inherited` 深相等时，编辑器会**删掉** profile 覆盖项 —— 这正是"恢复默认"的语义。
+4. **POST 路由的响应体不许 cancel**。`requestBody` 只管请求；把非 GET 的响应 `body.cancel()` 掉看着"干净"，
+   实际会把 JSON 吞掉，前端只看到 `HTTP 200` 却解析不出内容（保存配置曾因此一直报错）。
 
 ### 已核对的实现事实（DSH 44.0.0）
 
@@ -97,6 +137,13 @@ package.json
 | `sessionQuery` 有 `listSessions()`（轻量、不重放日志）与 `readSession(id)`（重放整份日志）；事件形如 `{type, data, time}`，`tool/call` 的名字在 `data.name` | `dsh-session-query/README.zh.md` |
 | 右侧停靠栏的 tab 类型是**两阶段注册**：先 `ctx.sidebarRightTabs.register({id, kind, ...})` 声明类型，再 `ctx.slots.register({name:'sidebar.right.pane.tab', key: <type id>}, Body)`；`id` 在全部注册中必须唯一 | `dsh-client-ui-sidebar-right/README.zh.md` §扩展席位 |
 | 会话投影的 schema **必须是 Zod**（schemastery 无 `.parse()`，纯 JSON Schema 也不行）；`link:` 安装的包解析不到 `zod`，需自己 vendor 到插件目录的 `node_modules` | 本机另一插件的 vendor 先例 |
+| `dsh-mcp-client` 的 Config 是**判别联合**：`transport: 'stdio'`（`command` 必填 / `args` / `env` / `cwd`）或 `transport: 'streamable-http'`（`url` 必填 / `headers`）；`serverName` 必须匹配 `^[A-Za-z0-9_-]{1,32}$` 且**全局唯一**（重复会抛） | `dsh-mcp-client/lib/index.js:780-800`、`:818` |
+| MCP SDK 的 `StdioClientTransport` 用 **`shell: false`** 起进程 —— 所以 Windows 上 `command` 不能是 `.cmd` 垫片（`npx`），要用 `node.exe + npm/bin/npx-cli.js` | `@modelcontextprotocol/client/dist/stdio.mjs:68-79` |
+| stdio 子进程的环境是 `scrubbedParentEnv()`：**保留 `PATH`/`HOME`/locale/代理**，只去掉凭据形状的名字与全部 `DSH_*` | `dsh-subprocess/lib/index.js:33-56` |
+| `installBundle(spec, options)` 接受**本地绝对路径**；`options = {activateNewBundles(默认 true), requestId, approvedBuilds, registry}`；`removeBundle(name)` 对称 | `dsh-plugin-manager/lib/index.js:1691`、`:1844`、`lib/typert.host.js:796` |
+| 官方 registry 的真实字段：`{servers:[{server, _meta}], metadata:{nextCursor}}`；server 里是 `packages[].{registryType, identifier, packageArguments, environmentVariables[{name, description, isRequired, isSecret}]}` 与 `remotes[].{type, url}`；**`status`/`publishedAt`/`isLatest` 在 `_meta["io.modelcontextprotocol.registry/official"]` 里** | `registry.modelcontextprotocol.io/v0/servers` 实测 |
+| `ConnectionRequestBodyMode = 'buffered' \| 'streaming'` **只约束请求体**；响应体没有任何"必须抽干"的要求 | `dsh-tool-cordis/lib/types/api-catalog.js:4752` |
+| 客户端入口激活失败会**中止整个 web boot**（`web boot: N entry did not activate`），并连带让别的插件的「为当前 Web 部署授权设置 RPC」跑不完 | `%APPDATA%\@deepseek-ai\dsh-desktop\logs\crash-*-web-boot.log` 实测 |
 
 ## 安装
 
@@ -130,15 +177,23 @@ https://github.com/hd25071/dsh-plugin-mcp-manager
 - [x] 配置编辑（保存 / 恢复默认）+ 启停
 - [x] 诊断路由（本 profile 挂了哪些服务）
 - [x] 调用记录（右侧停靠栏独立页，按会话，含耗时与结果规模）
+- [x] **MCP 市场**（官方注册表快照 + 本地搜索 + 一键安装 + 安装即配置 + 自检 + 卸载/更新）
+- [ ] **二期**：容器（`oci`）与 `mcpb`/`nuget` 包、`sse` 远程传输、密钥改走 DSH 凭据域（不再明文落在 patch 里）
+- [ ] **三期**：把自研 MCP 上架成可安装条目、来源可信度标记、把 `~/.dsh/mcp-servers` 加进 `hmr.root` 让生成的组合包也能热应用
 - [ ] **每条 MCP 行自己的配置页**：注册 `plugins.row.config`（key = `<bundle>#<rowId>`），
       让配置控件出现在该行自己的页面上，而不是只在本组合包的卡片里 —— 需要先在一个跑着的 DSH 上验证动态 key 集的注册时机
 - [ ] 调用记录的**跨会话汇总**（当前一次只看一个会话）
 
 ## 状态与验证
 
-**尚未在运行中的 DSH 里验证过。** 已做的检查：两个半侧 `node --check` 通过、清单 JSON 合法、
-仓库无任何个人/环境内容。已知不确定点：
+**已在真实 DSH 里跑起来**（2026-10-09）：插件作为组合包装进 profile，web boot 干净、卡片显示「运行中」。
+自动化检查：`npm test` **24 个用例全过**（客户端激活契约 7 + 深渲染冒烟 4 + 市场核心 7 + 市场路由 6），
+两个半侧 `node --check` 通过，仓库无任何个人/环境内容。测试抓出并修掉了三个真 bug：
+`metaOf` 引用了不存在的常量（刷新目录必崩）、**POST 响应体被 cancel 掉**（保存配置只报 `HTTP 200`）、
+`Panel` 里 `note` 状态漏声明（管理器卡片一渲染就抛错）。已知不确定点：
 
+- **工具数**依赖 `ctx.get('tools')` 上是否存在可读的工具集合；`dsh-tools` 只公开 `register/restrict/guard`，
+  没有列表接口，所以本插件用防御式探测，读不到就显示「工具数未知」而不是编一个数。
 - `configEditor.configuration()` 与 `loader` entry 的**字段名**在不同版本间可能不同；
   清单路由对 `name`/`module`/`specifier` 做了兼容读取，读不到就退回 `pluginManager.listBundles()` 的只读清单。
 - `listSessions()` 返回对象的字段名（`id` / `title` / `live` / `persisted`）按文档推断并对常见别名做了兜底；
@@ -147,6 +202,8 @@ https://github.com/hd25071/dsh-plugin-mcp-manager
   首次安装若卡片不出现，先看浏览器控制台是否有 `slot entry crashed`。
 - 右侧停靠栏的两阶段注册（`sidebarRightTabs.register` + `sidebar.right.pane.tab`）按官方 README 实现；
   若 tab 打不开，先看 `ctx.sidebarRight` 是否存在（插件页上的按钮会提示）。
+- **重新安装同一条目**会重写生成的 patch；生成的组合包不在 `hmr.root` 里，所以改动通常要等下次加载才生效
+  （三期会把它加进 `hmr.root`）。
 
 ## 许可
 

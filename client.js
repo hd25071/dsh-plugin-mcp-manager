@@ -65,6 +65,37 @@ window.__ModuleLoader__.load({
       return call(CALLS_ROUTE + (query === '' ? '' : '?' + query));
     };
 
+    const MARKET_ROUTE = 'api/mcp-manager/market';
+    const MARKET_SEARCH_ROUTE = 'api/mcp-manager/market/search';
+    const MARKET_DETAIL_ROUTE = 'api/mcp-manager/market/detail';
+    const MARKET_INSTALL_ROUTE = 'api/mcp-manager/market/install';
+    const MARKET_UNINSTALL_ROUTE = 'api/mcp-manager/market/uninstall';
+    const MARKET_INSTALLED_ROUTE = 'api/mcp-manager/market/installed';
+    const MARKET_REFRESH_ROUTE = 'api/mcp-manager/market/refresh';
+
+    const marketStatus = () => call(MARKET_ROUTE);
+    const marketInstalled = () => call(MARKET_INSTALLED_ROUTE);
+    const marketSearch = (q, kind, sort) => {
+      const params = new URLSearchParams();
+      if (q) params.set('q', q);
+      if (kind && kind !== 'all') params.set('kind', kind);
+      if (sort && sort !== 'relevance') params.set('sort', sort);
+      params.set('limit', '30');
+      return call(MARKET_SEARCH_ROUTE + '?' + params.toString());
+    };
+    const marketDetail = (name) => call(MARKET_DETAIL_ROUTE + '?name=' + encodeURIComponent(name));
+    const marketRefresh = () => call(MARKET_REFRESH_ROUTE, { method: 'POST' });
+    const marketInstall = (name, optionIndex, config) => call(MARKET_INSTALL_ROUTE, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name, optionIndex, config }),
+    });
+    const marketUninstall = (slug) => call(MARKET_UNINSTALL_ROUTE, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ slug }),
+    });
+
     /**
      * The sidebar controller, captured in `apply`. The manager page uses it to open
      * the call-log tab; the tab itself reads nothing from it.
@@ -369,10 +400,402 @@ window.__ModuleLoader__.load({
       );
     }
 
+    // ------------------------------------------------------------ market: install
+
+    /** How a generated row's live state reads on screen. */
+    const STATE_LABEL = {
+      active: '运行中',
+      failed: '启动失败',
+      absent: '未加载',
+      'not-loaded': '未加载',
+      pending: '等待中',
+      loading: '加载中',
+      unknown: '状态未知',
+      'no-loader': '状态未知',
+    };
+
+    /** Human age of the snapshot, for the "offline data" line. */
+    function ageText(ms) {
+      if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '';
+      const minutes = Math.floor(ms / 60000);
+      if (minutes < 1) return '刚刚';
+      if (minutes < 60) return minutes + ' 分钟前';
+      const hours = Math.floor(minutes / 60);
+      if (hours < 24) return hours + ' 小时前';
+      return Math.floor(hours / 24) + ' 天前';
+    }
+
+    /** One plan's command line or URL, as the confirmation dialog must show it verbatim. */
+    function commandLineOf(option) {
+      if (!option) return '';
+      if (option.kind === 'http') return option.url;
+      const quote = (part) => (/\s/.test(part) ? '"' + part + '"' : part);
+      return [option.command, ...(option.args || [])].map(quote).join(' ');
+    }
+
+    /**
+     * The install confirmation.
+     *
+     * The user sees, before anything runs: the exact command or URL, where the entry came
+     * from, which secrets it wants, and the fact that values are written to the profile's
+     * patch file in plain text.
+     */
+    function InstallDialog(props) {
+      const { name, onClose, onDone } = props;
+      const [detail, setDetail] = React.useState(null);
+      const [optionIndex, setOptionIndex] = React.useState(0);
+      const [values, setValues] = React.useState({});
+      const [busy, setBusy] = React.useState(false);
+      const [error, setError] = React.useState('');
+      const [result, setResult] = React.useState(null);
+
+      React.useEffect(() => {
+        let live = true;
+        (async () => {
+          try {
+            const value = await marketDetail(name);
+            if (!live) return;
+            setDetail(value);
+            const initial = {};
+            for (const option of value.options) {
+              for (const variable of option.variables) {
+                if (variable.default) initial[variable.name] = variable.default;
+              }
+            }
+            setValues(initial);
+          } catch (e) {
+            if (live) setError(String((e && e.message) || e));
+          }
+        })();
+        return () => { live = false; };
+      }, [name]);
+
+      const option = detail && detail.options[optionIndex];
+      const install = async () => {
+        setBusy(true);
+        setError('');
+        try {
+          const value = await marketInstall(name, optionIndex, values);
+          setResult(value);
+          if (onDone) onDone();
+        } catch (e) {
+          setError(String((e && e.message) || e));
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      if (result !== null) {
+        return h('div', { style: { ...S.card, borderColor: 'var(--dsw-alias-border, rgba(128,128,128,.5))' } },
+          h('div', { style: S.rowTop },
+            h('span', { style: S.name }, '已安装'),
+            h('span', { style: S.tag }, result.pkg),
+            result.reinstalled ? h('span', { style: S.tag }, '覆盖更新') : null,
+          ),
+          h('div', { style: { ...S.muted, marginTop: 6 } },
+            'MCP 行已写进新组合包 ', h('code', { style: S.mono }, result.dir),
+            '，serverName 为 ', h('code', { style: S.mono }, result.serverName), '。'),
+          h('div', { style: { ...S.muted, marginTop: 4 } },
+            '它出现在「MCP 行」页签里；工具以 ', h('code', { style: S.mono }, 'mcp__' + result.serverName + '__*'), ' 的名字提供给模型。'),
+          h('div', { style: { display: 'flex', gap: 8, marginTop: 10 } },
+            h('button', { style: S.btnPrimary, onClick: onClose }, '关闭'),
+          ),
+        );
+      }
+
+      return h('div', { style: { ...S.card, borderColor: 'var(--dsw-alias-border, rgba(128,128,128,.5))' } },
+        h('div', { style: S.rowTop },
+          h('span', { style: S.name }, detail ? detail.server.title : name),
+          h('span', { style: S.tag }, name),
+          detail && detail.server.version ? h('span', { style: S.tag }, 'v' + detail.server.version) : null,
+          h('span', { style: { ...S.tag, ...S.muted } }, '来源：官方 MCP 注册表'),
+          h('span', { style: { flex: 1 } }),
+          h('button', { style: S.btn, onClick: onClose }, '取消'),
+        ),
+        detail && detail.server.description
+          ? h('div', { style: { ...S.muted, marginTop: 6 } }, detail.server.description)
+          : null,
+
+        !detail && !error ? h('div', { style: { ...S.muted, marginTop: 8 } }, '读取安装方式…') : null,
+        error ? h('div', { style: S.err }, error) : null,
+
+        detail && detail.options.length === 0
+          ? h('div', { style: S.err }, '这台机器没有能跑它的运行时：',
+              (detail.blocked || []).map((item) => item.registryType + '（' + item.reason + '）').join('；'))
+          : null,
+
+        detail && detail.options.length > 1
+          ? h('div', { style: { marginTop: 8 } },
+              h('div', { style: S.label }, '安装方式'),
+              detail.options.map((item, index) => h('label', {
+                key: item.label,
+                style: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 4, cursor: 'pointer' },
+              },
+                h('input', {
+                  type: 'radio',
+                  checked: index === optionIndex,
+                  onChange: () => setOptionIndex(index),
+                }),
+                h('span', null, item.label),
+              )),
+            )
+          : null,
+
+        option
+          ? h('div', { style: { marginTop: 10 } },
+              h('div', { style: S.label }, option.kind === 'http' ? '将连接到的地址' : '将执行的命令'),
+              h('pre', { style: S.pre }, commandLineOf(option)),
+              h('div', { style: { ...S.muted, marginTop: 4 } }, '⚠️ ' + option.risk),
+            )
+          : null,
+
+        option && option.variables.length > 0
+          ? h('div', { style: { marginTop: 10 } },
+              h('div', { style: S.label }, '需要填写'),
+              option.variables.map((variable) => h('div', { key: variable.name, style: S.field },
+                h('label', { style: { ...S.label, ...S.mono } },
+                  variable.name,
+                  variable.isRequired ? h('span', { style: S.err }, ' *') : null),
+                h('input', {
+                  style: S.input,
+                  type: variable.isSecret ? 'password' : 'text',
+                  placeholder: variable.default || (variable.isRequired ? '必填' : '可留空'),
+                  value: values[variable.name] === undefined ? '' : values[variable.name],
+                  onChange: (event) => setValues((current) => ({ ...current, [variable.name]: event.target.value })),
+                }),
+              )),
+              h('div', { style: { ...S.muted, marginTop: 4 } },
+                '这些值会写进 profile 的 cordis.patch.yml（明文）。'),
+            )
+          : null,
+
+        option && option.variables.length === 0
+          ? h('div', { style: { ...S.muted, marginTop: 10 } }, '这个条目不需要填写任何配置。')
+          : null,
+
+        detail && (detail.blocked || []).length > 0
+          ? h('div', { style: { ...S.muted, marginTop: 8 } },
+              '其它方式：' + detail.blocked.map((item) => item.registryType + '（' + item.reason + '）').join('；'))
+          : null,
+
+        option
+          ? h('div', { style: { display: 'flex', gap: 8, marginTop: 12 } },
+              h('button', { style: S.btnPrimary, disabled: busy, onClick: install },
+                busy ? '安装中…' : '安装'),
+              h('button', { style: S.btn, disabled: busy, onClick: onClose }, '取消'),
+            )
+          : null,
+      );
+    }
+
+    // -------------------------------------------------------------- market: panel
+
+    /** The market tab: catalog status, installed market bundles, and local search. */
+    function MarketPanel(props) {
+      const { onInstalled } = props;
+      const [status, setStatus] = React.useState(null);
+      const [installed, setInstalled] = React.useState({ items: [], toolListing: false });
+      const [query, setQuery] = React.useState('');
+      const [kind, setKind] = React.useState('all');
+      const [sort, setSort] = React.useState('relevance');
+      const [results, setResults] = React.useState({ total: 0, results: [] });
+      const [busy, setBusy] = React.useState('');
+      const [error, setError] = React.useState('');
+      const [dialog, setDialog] = React.useState('');
+
+      const loadStatus = React.useCallback(async () => {
+        try {
+          setStatus(await marketStatus());
+        } catch (e) {
+          setError(String((e && e.message) || e));
+        }
+      }, []);
+      const loadInstalled = React.useCallback(async () => {
+        try {
+          setInstalled(await marketInstalled());
+        } catch (e) {
+          setError(String((e && e.message) || e));
+        }
+      }, []);
+      const runSearch = React.useCallback(async (q, k, s) => {
+        setBusy('search');
+        try {
+          setResults(await marketSearch(q, k, s));
+        } catch (e) {
+          setError(String((e && e.message) || e));
+        } finally {
+          setBusy('');
+        }
+      }, []);
+
+      React.useEffect(() => {
+        loadStatus();
+        loadInstalled();
+        runSearch('', 'all', 'relevance');
+      }, [loadStatus, loadInstalled, runSearch]);
+
+      // A refresh runs for minutes on the Host; poll while it does.
+      const refreshing = !!(status && status.refreshing && status.refreshing.running);
+      React.useEffect(() => {
+        if (!refreshing) return undefined;
+        const timer = setInterval(() => { loadStatus(); }, 2500);
+        return () => clearInterval(timer);
+      }, [refreshing, loadStatus]);
+
+      const refresh = async () => {
+        setBusy('refresh');
+        setError('');
+        try {
+          await marketRefresh();
+          await loadStatus();
+        } catch (e) {
+          setError(String((e && e.message) || e));
+        } finally {
+          setBusy('');
+        }
+      };
+
+      const uninstall = async (slug) => {
+        setBusy(slug);
+        setError('');
+        try {
+          await marketUninstall(slug);
+          await loadInstalled();
+          if (onInstalled) onInstalled();
+        } catch (e) {
+          setError(String((e && e.message) || e));
+        } finally {
+          setBusy('');
+        }
+      };
+
+      const runtimeLine = status
+        ? [
+            'npx ' + (status.runtimes.npx.available ? '可用' : '缺失'),
+            'uvx ' + (status.runtimes.uvx.available ? '可用' : '缺失'),
+            'docker ' + (status.runtimes.docker.available ? '可用' : '缺失'),
+          ].join(' · ')
+        : '';
+
+      return h('div', null,
+        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+          h('input', {
+            style: { ...S.input, flex: '1 1 220px' },
+            placeholder: '搜索 MCP 服务器（名称 / 描述，本地搜索）',
+            value: query,
+            onChange: (event) => setQuery(event.target.value),
+            onKeyDown: (event) => { if (event.key === 'Enter') runSearch(query, kind, sort); },
+          }),
+          h('select', {
+            style: S.input,
+            value: kind,
+            onChange: (event) => { setKind(event.target.value); runSearch(query, event.target.value, sort); },
+          },
+            h('option', { value: 'all' }, '全部'),
+            h('option', { value: 'local' }, '可本地安装'),
+            h('option', { value: 'remote' }, '仅远程'),
+          ),
+          h('select', {
+            style: S.input,
+            value: sort,
+            onChange: (event) => { setSort(event.target.value); runSearch(query, kind, event.target.value); },
+          },
+            h('option', { value: 'relevance' }, '相关度'),
+            h('option', { value: 'newest' }, '最新上架'),
+            h('option', { value: 'name' }, '名称'),
+          ),
+          h('button', { style: S.btn, onClick: () => runSearch(query, kind, sort) }, busy === 'search' ? '搜索中…' : '搜索'),
+          h('button', { style: S.btn, disabled: refreshing, onClick: refresh }, refreshing ? '刷新中…' : '刷新目录'),
+        ),
+
+        h('div', { style: { ...S.muted, marginTop: 6, lineHeight: 1.7 } },
+          status
+            ? '目录：' + status.count + ' 个服务器 · 更新于 ' + ageText(status.ageMs) +
+              (status.stale ? '（已过期，建议刷新）' : '') + ' · ' + runtimeLine
+            : '读取目录状态…',
+          status && status.source === 'none'
+            ? h('div', null, '还没有本地快照，点「刷新目录」拉一次全量（约 100 秒，之后都是本地搜索）。')
+            : null,
+          refreshing
+            ? h('div', null, '正在后台拉取：已 ' + status.refreshing.pages + ' 页 / ' +
+                status.refreshing.rawEntries + ' 条，保留 ' + status.refreshing.kept + ' 个服务器。')
+            : null,
+          status && status.refreshing && status.refreshing.error
+            ? h('div', { style: S.err }, '上次刷新失败：' + status.refreshing.error + '（继续使用本地快照）')
+            : null,
+        ),
+
+        error ? h('div', { style: S.err }, error) : null,
+
+        dialog !== ''
+          ? h(InstallDialog, {
+              name: dialog,
+              onClose: () => setDialog(''),
+              onDone: () => { loadInstalled(); loadStatus(); },
+            })
+          : null,
+
+        installed.items.length > 0
+          ? h('div', { style: { marginTop: 14 } },
+              h('div', { style: { ...S.title, marginBottom: 6 } }, '从市场安装的（' + installed.items.length + '）'),
+              installed.items.map((item) => h('div', { key: item.slug, style: S.card },
+                h('div', { style: S.rowTop },
+                  h('span', { style: S.name }, item.registryTitle || item.registryName),
+                  h('span', { style: { ...S.tag, ...S.muted } }, item.kind === 'http' ? '远程' : item.registryType),
+                  h('span', { style: { ...S.tag, ...(item.state === 'active' ? S.muted : S.err) } },
+                    STATE_LABEL[item.state] || item.state),
+                  item.toolCount !== null && item.toolCount !== undefined
+                    ? h('span', { style: { ...S.tag, ...S.muted } }, '✓ ' + item.toolCount + ' 个工具')
+                    : (installed.toolListing === false
+                        ? h('span', { style: { ...S.tag, ...S.muted } }, '工具数未知')
+                        : null),
+                  item.updateAvailable
+                    ? h('span', { style: { ...S.tag, ...S.muted } }, '有新版 v' + item.latestVersion)
+                    : null,
+                  h('span', { style: { flex: 1 } }),
+                  h('button', {
+                    style: S.btn,
+                    disabled: busy === item.slug,
+                    onClick: () => uninstall(item.slug),
+                  }, busy === item.slug ? '卸载中…' : '卸载'),
+                ),
+                h('div', { style: { ...S.mono, ...S.muted, marginTop: 4, wordBreak: 'break-all' } },
+                  item.kind === 'http' ? item.url : (item.command || '') + ' ' + ((item.args || []).join(' '))),
+                h('div', { style: { ...S.muted, marginTop: 2 } },
+                  'serverName ' + item.serverName + ' · 组合包 ' + item.pkg +
+                  (item.configKeys && item.configKeys.length > 0 ? ' · 已配置 ' + item.configKeys.join(', ') : '')),
+                item.error ? h('div', { style: S.err }, item.error) : null,
+              )),
+            )
+          : null,
+
+        h('div', { style: { marginTop: 14 } },
+          h('div', { style: { ...S.title, marginBottom: 6 } },
+            '搜索结果（' + results.total + '）'),
+          results.results.length === 0
+            ? h('div', { style: S.muted }, '没有匹配的条目。')
+            : results.results.map((hit) => h('div', { key: hit.name, style: S.card },
+                h('div', { style: S.rowTop },
+                  h('span', { style: S.name }, hit.title),
+                  hit.version ? h('span', { style: { ...S.tag, ...S.muted } }, 'v' + hit.version) : null,
+                  h('span', { style: S.tag }, hit.hasLocal ? (hit.types.filter((t) => t === 'npm' || t === 'pypi').join('/') || '本地') : '远程'),
+                  hit.hasRemote && hit.hasLocal ? h('span', { style: { ...S.tag, ...S.muted } }, '也可远程') : null,
+                  h('span', { style: { flex: 1 } }),
+                  h('button', { style: S.btnPrimary, onClick: () => setDialog(hit.name) }, '安装'),
+                ),
+                h('div', { style: { ...S.mono, ...S.muted, marginTop: 3 } }, hit.name),
+                hit.description ? h('div', { style: { ...S.muted, marginTop: 3 } }, hit.description) : null,
+              )),
+        ),
+      );
+    }
+
     // ---------------------------------------------------------------------- page
 
     function Panel() {
       const [state, setState] = React.useState({ status: 'loading', value: null, error: '' });
+      const [tab, setTab] = React.useState('rows');
+      const [note, setNote] = React.useState('');
 
       const load = React.useCallback(async () => {
         try {
@@ -412,24 +835,39 @@ window.__ModuleLoader__.load({
           h('button', { style: S.btn, onClick: load }, '刷新'),
         ),
 
+        h('div', { style: { display: 'flex', gap: 6, marginBottom: 10 } },
+          h('button', {
+            style: tab === 'rows' ? S.btnPrimary : S.btn,
+            onClick: () => setTab('rows'),
+          }, 'MCP 行'),
+          h('button', {
+            style: tab === 'market' ? S.btnPrimary : S.btn,
+            onClick: () => setTab('market'),
+          }, '市场'),
+        ),
+
         note ? h('div', { style: { ...S.muted, marginBottom: 8 } }, note) : null,
 
-        state.error ? h('div', { style: S.err }, state.error) : null,
+        tab === 'market'
+          ? h(MarketPanel, { onInstalled: load })
+          : h('div', null,
+              state.error ? h('div', { style: S.err }, state.error) : null,
 
-        state.status === 'ready' && !state.error && rows.length === 0
-          ? h('div', { style: S.muted },
-              '当前 profile 里没有 @deepseek-ai/dsh-mcp-client 行。装一个 MCP 组合包后回到这里刷新。')
-          : null,
+              state.status === 'ready' && !state.error && rows.length === 0
+                ? h('div', { style: S.muted },
+                    '当前 profile 里没有 @deepseek-ai/dsh-mcp-client 行。去「市场」装一个，或装一个 MCP 组合包后回到这里刷新。')
+                : null,
 
-        rows.map((row) => h(Row, { key: row.id || Math.random().toString(36), row, onReload: load })),
+              rows.map((row) => h(Row, { key: row.id || Math.random().toString(36), row, onReload: load })),
 
-        h('div', { style: { ...S.muted, marginTop: 12, lineHeight: 1.7 } },
-          '改动写进当前 profile 的 cordis.patch.yml（由 DSH 的配置编辑服务落盘并热应用）；',
-          '带 * 的字段表示这一行已在 profile 里覆盖过。',
-          '「恢复默认」会移除覆盖项、回到组合包声明的值。',
-          caps.write === false ? '（注意：本 profile 未挂载 configEditor，只能读。）' : '',
-          caps.rowPages === false ? '（有行缺少所属组合包信息，逐行配置页暂不可用。）' : '',
-        ),
+              h('div', { style: { ...S.muted, marginTop: 12, lineHeight: 1.7 } },
+                '改动写进当前 profile 的 cordis.patch.yml（由 DSH 的配置编辑服务落盘并热应用）；',
+                '带 * 的字段表示这一行已在 profile 里覆盖过。',
+                '「恢复默认」会移除覆盖项、回到组合包声明的值。',
+                caps.write === false ? '（注意：本 profile 未挂载 configEditor，只能读。）' : '',
+                caps.rowPages === false ? '（有行缺少所属组合包信息，逐行配置页暂不可用。）' : '',
+              ),
+            ),
       );
     }
 

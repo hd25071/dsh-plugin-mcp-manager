@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-mcp-manager",
-  "version": "0.2.0",
-  "description": "MCP server manager for DeepSeek Harness: list every MCP row in the current profile, read and edit its configuration from the Plugins page, and enable or disable it.",
+  "version": "0.3.0",
+  "description": "MCP server manager and marketplace for DeepSeek Harness: browse the official MCP registry, install a server as a profile row with one click, then read, edit, enable or disable every MCP row from the Plugins page.",
   "type": "module",
   "license": "MIT",
   "author": "hd25071",
@@ -12,6 +12,7 @@
     "dsh-plugin",
     "mcp",
     "model-context-protocol",
+    "mcp-marketplace",
     "plugin-manager"
   ],
   "repository": {
@@ -32,6 +33,7 @@
   },
   "files": [
     "index.js",
+    "market.js",
     "client.js",
     "cordis.patch.yml",
     "README.md",
@@ -41,7 +43,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "check": "node --check index.js && node --check client.js && node --test test/**/*.test.mjs",
+    "check": "node --check index.js && node --check market.js && node --check client.js && node --test test/**/*.test.mjs",
     "test": "node --test test/**/*.test.mjs"
   },
   "dsh": {

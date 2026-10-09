@@ -23,6 +23,7 @@
  *
  * @module dsh-plugin-mcp-manager
  */
+import * as market from './market.js';
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'mcp-manager';
@@ -39,6 +40,13 @@ export const ENABLED_PATH = '/api/mcp-manager/enabled';
 export const HEALTH_PATH = '/api/mcp-manager/health';
 export const SESSIONS_PATH = '/api/mcp-manager/sessions';
 export const CALLS_PATH = '/api/mcp-manager/calls';
+export const MARKET_PATH = '/api/mcp-manager/market';
+export const MARKET_REFRESH_PATH = '/api/mcp-manager/market/refresh';
+export const MARKET_SEARCH_PATH = '/api/mcp-manager/market/search';
+export const MARKET_DETAIL_PATH = '/api/mcp-manager/market/detail';
+export const MARKET_INSTALL_PATH = '/api/mcp-manager/market/install';
+export const MARKET_UNINSTALL_PATH = '/api/mcp-manager/market/uninstall';
+export const MARKET_INSTALLED_PATH = '/api/mcp-manager/market/installed';
 
 /** Tool names an MCP server contributes are prefixed this way. */
 const MCP_TOOL_PREFIX = 'mcp__';
@@ -509,6 +517,331 @@ async function callsResponse(request, ctx) {
   return json({ ok: true, value: { sessionId, total, calls: calls.slice(0, limit) } });
 }
 
+/** Cordis fiber states, as the loader reports them. */
+const FIBER_STATES = { 0: 'pending', 1: 'loading', 2: 'active', 3: 'failed' };
+
+/**
+ * Every `serverName` already loaded in this profile.
+ *
+ * `dsh-mcp-client` throws when two instances claim one `serverName`, so a generated row
+ * must be named around the existing ones rather than colliding with them.
+ *
+ * @param ctx - the plugin context.
+ * @returns the taken names, or an empty list when the editor is absent.
+ */
+function takenServerNames(ctx) {
+  const editor = serviceOf(ctx, 'configEditor');
+  const names = [];
+  try {
+    if (editor === undefined || typeof editor.configuration !== 'function') return names;
+    for (const item of editor.configuration() || []) {
+      const entry = item && item.entry;
+      if (moduleOfEntry(entry) !== MCP_MODULE) continue;
+      const effective = { ...((item && item.inherited) || {}), ...((item && item.override) || {}) };
+      if (typeof effective.serverName === 'string' && effective.serverName !== '') names.push(effective.serverName);
+    }
+  } catch {
+    /* a missing editor costs collision avoidance, never the route */
+  }
+  return names;
+}
+
+/** The error a failed fiber carries, however this Cordis build spells it. */
+function errorTextOf(fiber) {
+  for (const key of ['error', 'reason', 'cause']) {
+    try {
+      const value = Reflect.get(fiber, key);
+      if (value === undefined || value === null) continue;
+      const text = typeof value === 'string' ? value : String((value && value.message) || value);
+      if (text !== '') return text;
+    } catch {
+      /* keep looking */
+    }
+  }
+  return '';
+}
+
+/**
+ * Read a collection of tool names out of the tools service, if this build exposes one.
+ *
+ * `dsh-tools` documents only `register` / `restrict` / `guard`, so there is no supported
+ * listing. This probes a few plausible accessors defensively and answers `null` when none
+ * of them yields a collection — the UI then says the count is unknown instead of lying.
+ *
+ * @param ctx - the plugin context.
+ * @returns tool names, or `null`.
+ */
+function toolNamesOf(ctx) {
+  const tools = serviceOf(ctx, 'tools');
+  if (tools === undefined || tools === null) return null;
+  const normalize = (value) => {
+    if (value === undefined || value === null) return null;
+    if (value instanceof Map) return [...value.keys()].map(String);
+    if (Array.isArray(value)) {
+      const names = value.map((item) => (typeof item === 'string' ? item : (item && (item.name || item.id)) || '')).filter((item) => item !== '');
+      return names.length === 0 && value.length > 0 ? null : names;
+    }
+    if (typeof value === 'object') return Object.keys(value);
+    return null;
+  };
+  for (const key of ['list', 'all', 'definitions', 'registry', 'entries', 'snapshot', 'names', 'tools']) {
+    try {
+      const value = Reflect.get(tools, key);
+      if (typeof value === 'function') {
+        const produced = normalize(value.call(tools));
+        if (produced !== null) return produced;
+        continue;
+      }
+      const produced = normalize(value);
+      if (produced !== null) return produced;
+    } catch {
+      /* keep probing */
+    }
+  }
+  return null;
+}
+
+/** One installed row's live state, plus the tool count when the build allows reading it. */
+function stateOfRow(ctx, manifest, toolNames) {
+  const loader = serviceOf(ctx, 'loader');
+  let state = 'unknown';
+  let error = '';
+  try {
+    if (loader === undefined || typeof loader.entries !== 'function') state = 'no-loader';
+    else {
+      const entry = [...loader.entries()].find((item) => item && item.options && item.options.id === manifest.rowId);
+      if (entry === undefined) state = 'absent';
+      else if (entry.fiber === undefined || entry.fiber === null) state = 'not-loaded';
+      else {
+        state = FIBER_STATES[entry.fiber.state] || `state-${String(entry.fiber.state)}`;
+        error = errorTextOf(entry.fiber);
+      }
+    }
+  } catch (caught) {
+    error = String((caught && caught.message) || caught);
+  }
+  let toolCount = null;
+  if (toolNames !== null && typeof manifest.serverName === 'string' && manifest.serverName !== '') {
+    const prefix = `mcp__${manifest.serverName}__`;
+    toolCount = toolNames.filter((name) => name.startsWith(prefix)).length;
+  }
+  return { state, error, toolCount };
+}
+
+/**
+ * Answer the catalog status route.
+ *
+ * @returns freshness, refresh progress, the machine's runtimes, and the cache path.
+ */
+function marketStatusResponse() {
+  const state = market.catalog();
+  return json({
+    ok: true,
+    value: {
+      fetchedAt: state.fetchedAt,
+      count: state.count,
+      stale: state.stale,
+      ageMs: state.ageMs,
+      source: state.source,
+      refreshing: market.refreshState(),
+      runtimes: market.detectRuntimes(),
+      cachePath: market.cachePath(),
+      installed: market.listInstalled().length,
+    },
+  });
+}
+
+/**
+ * Start a snapshot refresh. The pull takes minutes, so it runs detached and the UI polls
+ * the status route; the previous snapshot keeps answering searches meanwhile.
+ *
+ * @returns the refresh state at the moment the request was accepted.
+ */
+function marketRefreshResponse() {
+  if (!market.refreshState().running) void market.refreshCatalog();
+  return json({ ok: true, value: { refreshing: market.refreshState() } });
+}
+
+/**
+ * Search the cached snapshot locally — never the network.
+ *
+ * @param request - the incoming request.
+ * @returns the page of results plus catalog freshness.
+ */
+function marketSearchResponse(request) {
+  const params = new URL(request.url).searchParams;
+  const found = market.searchCatalog(params.get('q') || '', {
+    kind: params.get('kind') || 'all',
+    sort: params.get('sort') || 'relevance',
+    limit: Number(params.get('limit')),
+    offset: Number(params.get('offset')),
+  });
+  const state = market.catalog();
+  return json({
+    ok: true,
+    value: { ...found, catalogCount: state.count, fetchedAt: state.fetchedAt, stale: state.stale },
+  });
+}
+
+/**
+ * One catalog entry with every way this machine could install it.
+ *
+ * @param request - the incoming request.
+ * @param ctx - the plugin context.
+ * @returns the detail envelope the install dialog renders.
+ */
+function marketDetailResponse(request, ctx) {
+  const name = new URL(request.url).searchParams.get('name') || '';
+  const server = market.findServer(name);
+  if (server === null) return failure('not-found', `the catalog has no server named "${name}"`, 404);
+  const runtimes = market.detectRuntimes();
+  const { options, blocked } = market.plansFor(server, runtimes);
+  return json({
+    ok: true,
+    value: {
+      server,
+      options,
+      blocked,
+      installed: market.listInstalled().find((item) => item.registryName === name) || null,
+      slug: market.slugFor(name),
+      serverName: market.serverNameFor(name, takenServerNames(ctx)),
+      runtimes,
+    },
+  });
+}
+
+/**
+ * Install one catalog entry: write its bundle, then hand it to the official installer.
+ *
+ * The generated bundle is a real package, so `pluginManager.installBundle` performs the
+ * sanctioned profile change (dependency + bundle selection + link) rather than this
+ * plugin editing profile configuration behind the manager's back.
+ *
+ * @param request - the incoming request.
+ * @param ctx - the plugin context.
+ * @returns the install envelope.
+ */
+async function marketInstallResponse(request, ctx) {
+  const manager = serviceOf(ctx, 'pluginManager');
+  if (manager === undefined || typeof manager.installBundle !== 'function') {
+    return failure('service-unavailable', 'the pluginManager service is not mounted in this profile', 503);
+  }
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return failure('bad-request', 'body must be JSON', 400);
+  }
+  const name = typeof body.name === 'string' ? body.name : '';
+  const server = market.findServer(name);
+  if (server === null) return failure('not-found', `the catalog has no server named "${name}"`, 404);
+
+  const runtimes = market.detectRuntimes();
+  const { options } = market.plansFor(server, runtimes);
+  const index = Number.isInteger(body.optionIndex) ? body.optionIndex : 0;
+  const plan = options[index];
+  if (plan === undefined) {
+    return failure('no-install-option', 'this machine has no runtime for any package this server publishes', 409);
+  }
+
+  // Only declared variables are written, and only when they carry a value.
+  const allowed = new Set(plan.variables.map((variable) => variable.name));
+  const config = {};
+  for (const [key, value] of Object.entries(body.config || {})) {
+    if (!allowed.has(key)) continue;
+    if (typeof value !== 'string' || value === '') continue;
+    config[key] = value;
+  }
+  const missing = plan.variables.filter((variable) => variable.isRequired && config[variable.name] === undefined).map((variable) => variable.name);
+  if (missing.length > 0) return failure('missing-config', `required configuration is empty: ${missing.join(', ')}`, 400);
+
+  const slug = market.slugFor(name);
+  const existing = market.manifestFor(slug);
+  const serverName = market.serverNameFor(name, takenServerNames(ctx));
+  let written;
+  try {
+    written = market.writeBundle({ slug, server, serverName, plan, config });
+  } catch (error) {
+    return failure('write-failed', String((error && error.message) || error), 500);
+  }
+  try {
+    const result = await manager.installBundle(written.dir, { activateNewBundles: true });
+    return json({
+      ok: true,
+      value: {
+        slug,
+        pkg: written.pkg,
+        dir: written.dir,
+        serverName,
+        reinstalled: existing !== null,
+        install: result === undefined ? null : result,
+      },
+    });
+  } catch (error) {
+    return failure('install-failed', String((error && error.message) || error), 500);
+  }
+}
+
+/**
+ * Remove one generated bundle: the official removal first, the directory only after it.
+ *
+ * A failed removal keeps the directory so the profile and the market still agree on what
+ * exists; deleting first would leave a dependency pointing at nothing.
+ *
+ * @param request - the incoming request.
+ * @param ctx - the plugin context.
+ * @returns the uninstall envelope.
+ */
+async function marketUninstallResponse(request, ctx) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return failure('bad-request', 'body must be JSON', 400);
+  }
+  const slug = typeof body.slug === 'string' ? body.slug : '';
+  const manifest = market.manifestFor(slug);
+  if (manifest === null) return failure('not-found', `no installed market bundle with slug "${slug}"`, 404);
+
+  const manager = serviceOf(ctx, 'pluginManager');
+  if (manager === undefined || typeof manager.removeBundle !== 'function') {
+    return failure('service-unavailable', 'the pluginManager service is not mounted in this profile', 503);
+  }
+  let removed;
+  try {
+    removed = await manager.removeBundle(manifest.pkg);
+  } catch (error) {
+    return failure('uninstall-failed', String((error && error.message) || error), 500);
+  }
+  const deleted = market.removeBundleDir(slug);
+  return json({ ok: true, value: { slug, pkg: manifest.pkg, removed: removed === undefined ? null : removed, deleted } });
+}
+
+/**
+ * The installed list: the generated manifests joined with each row's live state.
+ *
+ * @param ctx - the plugin context.
+ * @returns the installed envelope, including whether the registry has a newer version.
+ */
+function marketInstalledResponse(ctx) {
+  const manifests = market.listInstalled();
+  const state = market.catalog();
+  const toolNames = toolNamesOf(ctx);
+  const items = manifests.map((manifest) => {
+    const entry = state.servers.find((server) => server.name === manifest.registryName) || null;
+    const live = stateOfRow(ctx, manifest, toolNames);
+    return {
+      ...manifest,
+      state: live.state,
+      error: live.error,
+      toolCount: live.toolCount,
+      latestVersion: entry === null ? null : entry.version,
+      updateAvailable: entry !== null && entry.version !== '' && entry.version !== manifest.registryVersion,
+    };
+  });
+  return json({ ok: true, value: { items, count: items.length, toolListing: toolNames !== null } });
+}
+
 /**
  * Register the Fetch routes.
  *
@@ -523,12 +856,11 @@ export function apply(ctx) {
       path,
       methods,
       requestBody: 'buffered',
-      fetch: async (request) => {
-        const response = await handler(request, ctx);
-        if (request.method === 'GET') return response;
-        await response.body?.cancel();
-        return new Response(null, { status: response.status, headers: response.headers });
-      },
+      // The response is returned untouched for every method. Cancelling the body of a
+      // non-GET answer looks tidy but silently empties it, and the browser half then sees
+      // "HTTP 200" with no JSON — which is exactly how saving a config used to fail.
+      // `requestBody` governs the request only; nothing requires a drained response.
+      fetch: async (request) => handler(request, ctx),
     });
   };
 
@@ -538,4 +870,11 @@ export function apply(ctx) {
   register(CALLS_PATH, ['GET', 'HEAD'], async (request, context) => callsResponse(request, context));
   register(CONFIG_PATH, ['POST'], async (request, context) => configResponse(request, context));
   register(ENABLED_PATH, ['POST'], async (request, context) => enabledResponse(request, context));
+  register(MARKET_PATH, ['GET', 'HEAD'], async () => marketStatusResponse());
+  register(MARKET_SEARCH_PATH, ['GET', 'HEAD'], async (request) => marketSearchResponse(request));
+  register(MARKET_DETAIL_PATH, ['GET', 'HEAD'], async (request, context) => marketDetailResponse(request, context));
+  register(MARKET_INSTALLED_PATH, ['GET', 'HEAD'], async (_request, context) => marketInstalledResponse(context));
+  register(MARKET_REFRESH_PATH, ['POST'], async () => marketRefreshResponse());
+  register(MARKET_INSTALL_PATH, ['POST'], async (request, context) => marketInstallResponse(request, context));
+  register(MARKET_UNINSTALL_PATH, ['POST'], async (request, context) => marketUninstallResponse(request, context));
 }
