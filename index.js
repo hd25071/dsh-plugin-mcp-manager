@@ -931,7 +931,10 @@ function marketInstalledResponse(ctx) {
     updateAvailable: manifest.source !== 'local' && entry !== null && entry.version !== '' && entry.version !== manifest.registryVersion,
     };
   });
-  return json({ ok: true, value: { items, count: items.length, toolListing: toolNames !== null } });
+  // Opening the market is also the moment residue heals: a link left behind by any past
+  // uninstall is removed here, where nothing is mid-flight.
+  const pruned = market.pruneAllBundleLinks();
+  return json({ ok: true, value: { items, count: items.length, toolListing: toolNames !== null, prunedLinks: pruned } });
 }
 
 /**

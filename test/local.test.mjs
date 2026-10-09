@@ -435,6 +435,22 @@ test('a link is pruned even while the filesystem still calls its target live', (
   assert.equal(pruned.length, 1);
   assert.equal(existsSync(join(scope, slug)), false);
 });
+test('opening the market heals residue from any past uninstall', () => {
+  seedRegistry();
+  const scope = join(home, '.dsh', 'profiles', 'desktop', 'node_modules', '@dsh-mcp-market');
+  mkdirSync(scope, { recursive: true });
+  // A link to a bundle that is long gone, exactly like the one the uninstall-time prune missed.
+  symlinkSync(join(market.MARKET_ROOT, 'ghost-bundle-111111'), join(scope, 'ghost-bundle-111111'), 'junction');
+  // And one whose bundle is still installed: it must survive.
+  const live = market.slugFor('local.example/one');
+  mkdirSync(market.bundleDir(live), { recursive: true });
+  symlinkSync(market.bundleDir(live), join(scope, live), 'junction');
+
+  const pruned = market.pruneAllBundleLinks();
+  assert.equal(pruned.length, 1, 'only the residue');
+  assert.equal(existsSync(join(scope, 'ghost-bundle-111111')), false);
+  assert.equal(existsSync(join(scope, live)), true, 'a live bundle keeps its link');
+});
 test('the installed list reports what the tool count means', async () => {
   seedRegistry();
   seedLocal([stdioEntry('local.example/one')]);

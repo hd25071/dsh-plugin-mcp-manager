@@ -1033,6 +1033,55 @@ export function pruneBundleLinks(slug) {
   }
   return removed;
 }
+/**
+ * Remove every market link whose target no longer exists, across all profiles.
+ *
+ * The uninstall-time prune is the fast path, but it runs at the one moment when the filesystem
+ * and the package manager are both mid-flight, and a residue that survives it used to stay
+ * forever. This runs on the read path instead — opening the market is enough — so a leftover
+ * from any past install or uninstall heals itself, and nothing depends on that moment's timing.
+ *
+ * @returns the paths that were pruned.
+ */
+export function pruneAllBundleLinks() {
+  const removed = [];
+  const profiles = join(homedir(), '.dsh', 'profiles');
+  let names = [];
+  try {
+    names = readdirSync(profiles);
+  } catch {
+    return removed;
+  }
+  for (const name of names) {
+    const scope = join(profiles, name, 'node_modules', BUNDLE_SCOPE);
+    let entries = [];
+    try {
+      entries = readdirSync(scope);
+    } catch {
+      continue;
+    }
+    for (const slug of entries) {
+      const link = join(scope, slug);
+      let info;
+      try {
+        info = lstatSync(link);
+      } catch {
+        continue;
+      }
+      if (!info.isSymbolicLink()) continue;
+      // Only a link with nothing behind it: a bundle still installed keeps its link.
+      if (existsSync(link)) continue;
+      try {
+        rmSync(link, { recursive: true, force: true });
+        removed.push(link);
+      } catch {
+        /* the next read tries again */
+      }
+    }
+  }
+  return removed;
+}
+
 /** The directory of one generated bundle. */
 export function bundleDir(slug) {
   return join(MARKET_ROOT, slug);
