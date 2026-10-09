@@ -435,6 +435,24 @@ test('a link is pruned even while the filesystem still calls its target live', (
   assert.equal(pruned.length, 1);
   assert.equal(existsSync(join(scope, slug)), false);
 });
+test('the cleanup checks that the link is gone, not that the call returned', () => {
+  seedRegistry();
+  const scope = join(home, '.dsh', 'profiles', 'desktop', 'node_modules', '@dsh-mcp-market');
+  mkdirSync(scope, { recursive: true });
+  symlinkSync(join(market.MARKET_ROOT, 'ghost-two-222222'), join(scope, 'ghost-two-222222'), 'junction');
+
+  const pruned = market.pruneAllBundleLinks();
+  assert.equal(pruned.length, 1);
+  // The link itself must be gone — a junction whose target is missing also makes existsSync
+  // false, so that would have been the wrong check.
+  let present = true;
+  try {
+    lstatSync(join(scope, 'ghost-two-222222'));
+  } catch {
+    present = false;
+  }
+  assert.equal(present, false, 'the reparse point is gone, not merely unreachable');
+});
 test('opening the market heals residue from any past uninstall', () => {
   seedRegistry();
   const scope = join(home, '.dsh', 'profiles', 'desktop', 'node_modules', '@dsh-mcp-market');

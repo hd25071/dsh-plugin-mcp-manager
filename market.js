@@ -25,7 +25,9 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
+  rmdirSync,
   rmSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
@@ -1093,17 +1095,54 @@ export function pruneAllBundleLinks() {
       if (!info.isSymbolicLink()) continue;
       // Only a link with nothing behind it: a bundle still installed keeps its link.
       if (live) continue;
-      try {
-        rmSync(link, { recursive: true, force: true });
+      const outcome = removeLink(link);
+      if (outcome.ok) {
         removed.push(link);
-        report.removed.push(link);
-      } catch (error) {
-        report.errors.push(`rm ${slug}: ${String((error && error.code) || error)}`);
+        report.removed.push({ path: link, via: outcome.via });
+      } else {
+        report.errors.push(`unlink ${slug}: still present after ${outcome.tries} attempts (${outcome.error})`);
       }
     }
   }
   writePruneReport(report);
   return removed;
+}
+
+/**
+ * Remove one link, and then check that it is gone.
+ *
+ * `rmSync(link, {recursive: true, force: true})` reported success in the host process and left
+ * the link exactly where it was — no throw, no removal — while the same call from a shell
+ * removed it every time. The call is therefore not evidence; the effect is. Each attempt is
+ * followed by a look at the filesystem, and the report says which one worked, or that none did.
+ *
+ * @param link - the reparse point to remove.
+ * @returns `{ok, via, tries, error}`.
+ */
+function removeLink(link) {
+  const attempts = [
+    () => rmSync(link, { recursive: true, force: true }),
+    () => unlinkSync(link),
+    () => rmdirSync(link),
+  ];
+  let error = '';
+  for (let index = 0; index < attempts.length; index += 1) {
+    try {
+      attempts[index]();
+    } catch (caught) {
+      error = String((caught && caught.code) || caught);
+    }
+    // A junction whose target is missing makes `existsSync` false either way, so the check is
+    // on the link itself, not on what it points at.
+    let present = true;
+    try {
+      lstatSync(link);
+    } catch {
+      present = false;
+    }
+    if (!present) return { ok: true, via: index, tries: index + 1, error };
+  }
+  return { ok: false, via: -1, tries: attempts.length, error };
 }
 
 /** Write the last prune's findings where a person can read them. Never throws. */
