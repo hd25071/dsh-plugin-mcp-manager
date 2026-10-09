@@ -1020,8 +1020,10 @@ export function pruneBundleLinks(slug) {
       continue;
     }
     if (!info.isSymbolicLink()) continue;
-    // A live link keeps working; only a dangling one is residue.
-    if (existsSync(link)) continue;
+    // Two independent reasons to call it residue, because the filesystem's view of a link
+    // whose target was deleted a millisecond ago is not something to bet on: the target is
+    // gone, or the bundle is no longer installed at all.
+    if (existsSync(link) && manifestFor(slug) !== null) continue;
     try {
       rmSync(link, { recursive: true, force: true });
       removed.push(link);

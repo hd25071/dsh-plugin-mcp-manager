@@ -420,6 +420,21 @@ test('uninstall prunes the package-manager link it leaves behind', () => {
   assert.equal(existsSync(join(scope, slug)), true, 'a bundle that is still installed keeps its link');
 });
 
+test('a link is pruned even while the filesystem still calls its target live', () => {
+  seedRegistry();
+  seedLocal([stdioEntry('local.example/one')]);
+  const scope = join(home, '.dsh', 'profiles', 'desktop', 'node_modules', '@dsh-mcp-market');
+  const slug = market.slugFor('local.example/one');
+  mkdirSync(market.bundleDir(slug), { recursive: true });
+  mkdirSync(scope, { recursive: true });
+  symlinkSync(market.bundleDir(slug), join(scope, slug), 'junction');
+
+  // No manifest was ever written for this slug, so the bundle is not installed: the link is
+  // residue regardless of what the target check says at this instant.
+  const pruned = market.pruneBundleLinks(slug);
+  assert.equal(pruned.length, 1);
+  assert.equal(existsSync(join(scope, slug)), false);
+});
 test('the installed list reports what the tool count means', async () => {
   seedRegistry();
   seedLocal([stdioEntry('local.example/one')]);

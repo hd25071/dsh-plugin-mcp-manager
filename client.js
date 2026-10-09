@@ -967,9 +967,14 @@ window.__ModuleLoader__.load({
         setBusy(item.slug);
         setError('');
         try {
-          await marketUninstall(item.slug);
+          const done = await marketUninstall(item.slug);
           await loadInstalled();
           await runSearch(query, kind, sort, page, source);
+          // Say what the cleanup did: "uninstalled" and "uninstalled with a dead link still
+          // sitting in the profile" used to look identical from here.
+          const pruned = (done && done.pruned) || [];
+          setHint('已卸载「' + (item.registryTitle || item.registryName) + '」'
+            + (pruned.length > 0 ? '，并清理了 ' + pruned.length + ' 个残留链接' : ''));
         } catch (e) {
           setError(String((e && e.message) || e));
         } finally {
