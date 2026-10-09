@@ -352,6 +352,61 @@ test('the refresh route takes its mode from the body, and defaults to the cheap 
   }
 });
 
+test('the installed list counts the tools the MCP client registered', async () => {
+  seedCache();
+  const routes = new Map();
+  const ctx = {
+    get(key) {
+      if (key === 'connection') return { fetch: { register(spec) { routes.set(spec.path, spec); } } };
+      if (key === 'pluginManager') {
+        return { async installBundle() { return { exitCode: 0 }; }, async removeBundle() { return { exitCode: 0 }; } };
+      }
+      if (key === 'tools') {
+        // The documented enumeration on the tools service is `schemas()`; nothing else
+        // there lists tools, which is why the card used to show no count at all.
+        return {
+          schemas: () => [
+            { name: 'mcp__vendor-example__alpha' },
+            { name: 'mcp__vendor-example__beta' },
+            { name: 'unrelated_tool' },
+          ],
+        };
+      }
+      return undefined;
+    },
+  };
+  host.apply(ctx);
+
+  const installed = await call(routes, host.MARKET_INSTALL_PATH, host.MARKET_INSTALL_PATH, post({ name: 'vendor.example/mcp' }));
+  assert.equal(installed.status, 200);
+
+  const list = await call(routes, host.MARKET_INSTALLED_PATH, host.MARKET_INSTALLED_PATH);
+  const item = list.body.value.items[0];
+  assert.equal(item.serverName, 'vendor-example');
+  assert.equal(item.toolCount, 2, 'count only the tools under this server prefix');
+  assert.equal(list.body.value.toolListing, true, 'the UI can tell "no tools" apart from "cannot tell"');
+});
+
+test('an enumeration that is unavailable reports an unknown count rather than zero', async () => {
+  seedCache();
+  const routes = new Map();
+  const ctx = {
+    get(key) {
+      if (key === 'connection') return { fetch: { register(spec) { routes.set(spec.path, spec); } } };
+      if (key === 'pluginManager') {
+        return { async installBundle() { return { exitCode: 0 }; }, async removeBundle() { return { exitCode: 0 }; } };
+      }
+      return undefined; // no tools service mounted at all
+    },
+  };
+  host.apply(ctx);
+  await call(routes, host.MARKET_INSTALL_PATH, host.MARKET_INSTALL_PATH, post({ name: 'vendor.example/mcp' }));
+
+  const list = await call(routes, host.MARKET_INSTALLED_PATH, host.MARKET_INSTALLED_PATH);
+  assert.equal(list.body.value.items[0].toolCount, null, 'unknown, never a made-up zero');
+  assert.equal(list.body.value.toolListing, false);
+});
+
 test('the installed list compares versions by inequality only', async () => {
   seedCache();
   const { routes } = makeCtx();

@@ -612,7 +612,12 @@ function toolNamesOf(ctx) {
     if (typeof value === 'object') return Object.keys(value);
     return null;
   };
-  for (const key of ['list', 'all', 'definitions', 'registry', 'entries', 'snapshot', 'names', 'tools']) {
+  // `schemas` is the documented enumeration on the tools service
+  // (`dsh-tool-cordis/lib/types/api-catalog.js`, key `tools`):
+  // `schemas(scope?: ScopeKey): ToolSchema[]`. The other names are older guesses kept as
+  // fallbacks; without `schemas` the installed card silently showed no tool count even
+  // though the MCP client had registered four tools.
+  for (const key of ['schemas', 'list', 'all', 'definitions', 'registry', 'entries', 'snapshot', 'names', 'tools']) {
     try {
       const value = Reflect.get(tools, key);
       if (typeof value === 'function') {
