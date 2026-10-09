@@ -1045,11 +1045,28 @@ export function pruneBundleLinks(slug) {
  */
 export function pruneAllBundleLinks() {
   const removed = [];
+  // Every branch below used to swallow its failure, and a host process has nowhere to print
+  // to, so "found nothing" and "could not look" were indistinguishable from the outside. The
+  // report is what the host actually saw, written where a person can read it.
+  const report = {
+    at: new Date().toISOString(),
+    home: homedir(),
+    profilesDir: '',
+    profileNames: [],
+    scopes: [],
+    seen: [],
+    removed: [],
+    errors: [],
+  };
   const profiles = join(homedir(), '.dsh', 'profiles');
+  report.profilesDir = profiles;
   let names = [];
   try {
     names = readdirSync(profiles);
-  } catch {
+    report.profileNames = names;
+  } catch (error) {
+    report.errors.push(`readdir ${profiles}: ${String((error && error.code) || error)}`);
+    writePruneReport(report);
     return removed;
   }
   for (const name of names) {
@@ -1057,7 +1074,9 @@ export function pruneAllBundleLinks() {
     let entries = [];
     try {
       entries = readdirSync(scope);
-    } catch {
+      report.scopes.push(`${scope} → ${entries.length}`);
+    } catch (error) {
+      report.errors.push(`readdir ${scope}: ${String((error && error.code) || error)}`);
       continue;
     }
     for (const slug of entries) {
@@ -1065,21 +1084,36 @@ export function pruneAllBundleLinks() {
       let info;
       try {
         info = lstatSync(link);
-      } catch {
+      } catch (error) {
+        report.errors.push(`lstat ${slug}: ${String((error && error.code) || error)}`);
         continue;
       }
+      const live = existsSync(link);
+      report.seen.push({ slug, symbolic: info.isSymbolicLink(), directory: info.isDirectory(), live });
       if (!info.isSymbolicLink()) continue;
       // Only a link with nothing behind it: a bundle still installed keeps its link.
-      if (existsSync(link)) continue;
+      if (live) continue;
       try {
         rmSync(link, { recursive: true, force: true });
         removed.push(link);
-      } catch {
-        /* the next read tries again */
+        report.removed.push(link);
+      } catch (error) {
+        report.errors.push(`rm ${slug}: ${String((error && error.code) || error)}`);
       }
     }
   }
+  writePruneReport(report);
   return removed;
+}
+
+/** Write the last prune's findings where a person can read them. Never throws. */
+function writePruneReport(report) {
+  try {
+    mkdirSync(CACHE_DIR, { recursive: true });
+    writeFileSync(join(CACHE_DIR, 'prune-report.json'), JSON.stringify(report, null, 2), 'utf8');
+  } catch {
+    /* diagnostics must never break the read path */
+  }
 }
 
 /** The directory of one generated bundle. */
