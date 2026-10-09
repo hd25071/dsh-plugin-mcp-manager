@@ -327,6 +327,31 @@ test('a search result reflects that the entry is already installed', async () =>
   assert.equal(moved.body.value.results[0].updateAvailable, true);
 });
 
+test('the refresh route takes its mode from the body, and defaults to the cheap one', async () => {
+  seedCache();
+  const { routes } = makeCtx();
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, async json() { return { servers: [], metadata: {} }; } });
+  try {
+    const full = await call(routes, host.MARKET_REFRESH_PATH, host.MARKET_REFRESH_PATH, post({ mode: 'full' }));
+    assert.equal(full.status, 200);
+    assert.equal(full.body.value.refreshing.mode, 'full', 'the body selects the mode');
+    // Let the detached pull finish before the fetch stub goes away.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const plain = await call(routes, host.MARKET_REFRESH_PATH, host.MARKET_REFRESH_PATH, post({}));
+    assert.equal(plain.body.value.refreshing.mode, 'incremental', 'the button refreshes incrementally');
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const bare = await call(routes, host.MARKET_REFRESH_PATH, host.MARKET_REFRESH_PATH, { method: 'POST' });
+    assert.equal(bare.status, 200, 'a bodyless POST is the incremental case, not an error');
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  } finally {
+    globalThis.fetch = realFetch;
+    market.resetCatalog();
+  }
+});
+
 test('the installed list compares versions by inequality only', async () => {
   seedCache();
   const { routes } = makeCtx();

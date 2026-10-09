@@ -172,10 +172,15 @@ export function normalize(entry) {
 }
 
 /** One page of the registry. */
-async function fetchPage(cursor) {
+async function fetchPage(cursor, updatedSince) {
   const url = new URL(REGISTRY_BASE);
   url.searchParams.set('limit', String(PAGE_LIMIT));
   if (cursor !== undefined) url.searchParams.set('cursor', cursor);
+  // Verified against the live registry: `updated_since` really does filter, and the answer
+  // comes back ordered by the update time (asking for today returns entries published
+  // today; asking for 2020 returns the earliest). Unknown parameters are simply ignored,
+  // which is why this was checked by comparing first entries rather than status codes.
+  if (updatedSince !== undefined) url.searchParams.set('updated_since', updatedSince);
   const response = await fetch(url, {
     headers: { accept: 'application/json' },
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
@@ -184,8 +189,17 @@ async function fetchPage(cursor) {
   return response.json();
 }
 
+/**
+ * How far before the last successful pull an incremental cursor starts.
+ *
+ * Entries updated while a pull is in flight can sit behind the page already read, and the
+ * registry's clock is not ours. Re-reading ten minutes of changes is cheap; missing one
+ * update until the next refresh is not.
+ */
+const CURSOR_MARGIN_MS = 10 * 60 * 1000;
+
 /** Live refresh bookkeeping, so the UI can show progress instead of hanging. */
-const refresh = { running: false, startedAt: 0, pages: 0, rawEntries: 0, kept: 0, error: '', finishedAt: 0 };
+const refresh = { running: false, mode: '', startedAt: 0, pages: 0, rawEntries: 0, kept: 0, error: '', finishedAt: 0 };
 
 /** The current refresh state. */
 export function refreshState() {
@@ -196,12 +210,43 @@ export function refreshState() {
 let snapshot = null;
 
 /**
- * Pull the whole registry into the cache.
+ * Merge freshly pulled entries into the snapshot on disk.
  *
+ * Incremental refresh must never drop an entry: everything already known stays, and the
+ * pulled entries replace or add by name.
+ *
+ * @param servers - the normalized entries just pulled.
+ * @returns the number of entries in the merged snapshot.
+ */
+function mergeIntoCache(servers) {
+  const current = catalog();
+  const byName = new Map(current.servers.map((server) => [server.name, server]));
+  for (const server of servers) byName.set(server.name, server);
+  const merged = [...byName.values()].sort((left, right) =>
+    String(right.publishedAt || '').localeCompare(String(left.publishedAt || '')));
+  const fetchedAt = new Date().toISOString();
+  writeAtomic(CACHE_PATH, JSON.stringify({ cacheVersion: CACHE_VERSION, fetchedAt, count: merged.length, servers: merged }));
+  snapshot = { fetchedAt, servers: merged };
+  return merged.length;
+}
+
+/**
+ * Pull the registry into the cache.
+ *
+ * Two modes, because the two questions are different:
+ *
+ * - `incremental` (the default, what the refresh button does): ask only for what changed
+ *   since the last pull and merge. Seconds, not minutes, and the answer to "is there
+ *   anything new".
+ * - `full`: re-read everything and replace the snapshot. Minutes for a large catalog, and
+ *   the answer to "is my snapshot still correct".
+ *
+ * @param options - `{mode}`; anything but `full` means incremental.
  * @returns the refresh summary.
  */
-export async function refreshCatalog() {
+export async function refreshCatalog(options) {
   if (refresh.running) return refreshState();
+  let mode = options !== undefined && options !== null && options.mode === 'full' ? 'full' : 'incremental';
   refresh.running = true;
   refresh.startedAt = Date.now();
   refresh.pages = 0;
@@ -209,10 +254,18 @@ export async function refreshCatalog() {
   refresh.kept = 0;
   refresh.error = '';
   try {
+    const current = catalog();
+    let updatedSince;
+    if (mode === 'incremental') {
+      // Nothing to be incremental against: the first pull has to be a full one.
+      if (current.servers.length === 0 || current.fetchedAt === '') mode = 'full';
+      else updatedSince = new Date(Math.max(0, Date.parse(current.fetchedAt) - CURSOR_MARGIN_MS)).toISOString();
+    }
+    refresh.mode = mode;
     const byName = new Map();
     let cursor;
     while (refresh.pages < MAX_PAGES) {
-      const body = await fetchPage(cursor);
+      const body = await fetchPage(cursor, updatedSince);
       const list = Array.isArray(body.servers) ? body.servers : [];
       refresh.pages += 1;
       refresh.rawEntries += list.length;
@@ -224,19 +277,14 @@ export async function refreshCatalog() {
       cursor = body.metadata && body.metadata.nextCursor;
       if (cursor === undefined || cursor === null || cursor === '') break;
     }
-    const servers = [...byName.values()].sort((left, right) =>
-      String(right.publishedAt || '').localeCompare(String(left.publishedAt || '')));
-    // A short answer means an outage or a changed API, not an empty registry: keep the
-    // previous snapshot and say so, instead of overwriting good data with nothing.
-    if (servers.length < MIN_SNAPSHOT_ENTRIES) {
-      refresh.error = `the registry returned only ${servers.length} usable entries (expected at least ${MIN_SNAPSHOT_ENTRIES}); kept the previous snapshot`;
+    const servers = [...byName.values()];
+    if (mode === 'incremental') {
+      // An empty answer is a real answer here: nothing changed since the last pull.
+      refresh.kept = mergeIntoCache(servers);
       refresh.finishedAt = Date.now();
       return refreshState();
     }
-    const fetchedAt = new Date().toISOString();
-    writeAtomic(CACHE_PATH, JSON.stringify({ cacheVersion: CACHE_VERSION, fetchedAt, count: servers.length, servers }));
-    snapshot = { fetchedAt, servers };
-    refresh.finishedAt = Date.now();
+    commitFull(servers);
     return refreshState();
   } catch (error) {
     refresh.error = String((error && error.message) || error);
@@ -245,6 +293,29 @@ export async function refreshCatalog() {
   } finally {
     refresh.running = false;
   }
+}
+
+/**
+ * Replace the snapshot with a complete pull.
+ *
+ * A short answer means an outage or a changed API, not an empty registry: keep the
+ * previous snapshot and say so, instead of overwriting good data with nothing.
+ *
+ * @param servers - the normalized entries just pulled.
+ */
+function commitFull(servers) {
+  const sorted = [...servers].sort((left, right) =>
+    String(right.publishedAt || '').localeCompare(String(left.publishedAt || '')));
+  if (sorted.length < MIN_SNAPSHOT_ENTRIES) {
+    refresh.error = `the registry returned only ${sorted.length} usable entries (expected at least ${MIN_SNAPSHOT_ENTRIES}); kept the previous snapshot`;
+    refresh.finishedAt = Date.now();
+    return;
+  }
+  const fetchedAt = new Date().toISOString();
+  writeAtomic(CACHE_PATH, JSON.stringify({ cacheVersion: CACHE_VERSION, fetchedAt, count: sorted.length, servers: sorted }));
+  snapshot = { fetchedAt, servers: sorted };
+  refresh.kept = sorted.length;
+  refresh.finishedAt = Date.now();
 }
 
 /**

@@ -15,9 +15,9 @@ process.env.HOME = home;
 const market = await import('../market.js');
 
 /** One registry entry, shaped exactly like the live API answers. */
-function entry(name, { status = 'active', latest = true, packages = [], remotes = [], publishedAt = '2026-01-01T00:00:00Z' } = {}) {
+function entry(name, { status = 'active', latest = true, packages = [], remotes = [], publishedAt = '2026-01-01T00:00:00Z', version = '1.2.3' } = {}) {
   return {
-    server: { name, title: name, description: 'desc of ' + name, version: '1.2.3', packages, remotes },
+    server: { name, title: name, description: 'desc of ' + name, version, packages, remotes },
     _meta: { 'io.modelcontextprotocol.registry/official': { status, isLatest: latest, publishedAt } },
   };
 }
@@ -162,7 +162,7 @@ test('a custom registry base url is passed to the runner', () => {
   assert.equal(market.resolveArgv(plan).args.includes('--registry=https://npm.corp.test/'), true);
 });
 
-test('a short pull keeps the previous snapshot instead of blanking the market', async () => {
+test('a short full pull keeps the previous snapshot instead of blanking the market', async () => {
   mkdirSync(market.CACHE_DIR, { recursive: true });
   const good = {
     cacheVersion: market.CACHE_VERSION,
@@ -182,13 +182,80 @@ test('a short pull keeps the previous snapshot instead of blanking the market', 
     },
   });
   try {
-    const state = await market.refreshCatalog();
+    const state = await market.refreshCatalog({ mode: 'full' });
     assert.match(state.error, /only 1 usable entries/);
   } finally {
     globalThis.fetch = realFetch;
   }
   market.resetCatalog();
   assert.equal(market.catalog().count, 2, 'the previous snapshot must survive a failed pull');
+});
+
+test('the refresh button asks only for what changed, and merges instead of replacing', async () => {
+  mkdirSync(market.CACHE_DIR, { recursive: true });
+  const fetchedAt = new Date(Date.now() - 3600000).toISOString();
+  writeFileSync(market.CACHE_PATH, JSON.stringify({
+    cacheVersion: market.CACHE_VERSION,
+    fetchedAt,
+    count: 2,
+    servers: [market.normalize(entry('a/keep')), market.normalize(entry('b/old', { version: '1.0.0' }))],
+  }));
+  market.resetCatalog();
+
+  const seen = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    seen.push(String(url));
+    return {
+      ok: true,
+      async json() {
+        // Only one entry changed since the last pull, and one is brand new.
+        return { servers: [entry('b/old', { version: '2.0.0' }), entry('c/new')], metadata: {} };
+      },
+    };
+  };
+  try {
+    const state = await market.refreshCatalog();
+    assert.equal(state.mode, 'incremental', 'the default refresh is the cheap one');
+    assert.equal(state.error, '');
+    // It asked for changes only, from a little before the last pull.
+    assert.equal(seen.length, 1);
+    assert.match(seen[0], /updated_since=/);
+    const since = Date.parse(decodeURIComponent(/updated_since=([^&]+)/.exec(seen[0])[1]));
+    assert.equal(since < Date.parse(fetchedAt), true, 'the cursor starts before the last pull, never after it');
+    assert.equal(Date.parse(fetchedAt) - since, 10 * 60 * 1000, 'the safety margin is ten minutes');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  market.resetCatalog();
+
+  const after = market.catalog();
+  assert.equal(after.count, 3, 'an incremental pull adds and updates, and drops nothing');
+  const names = after.servers.map((server) => server.name).sort();
+  assert.deepEqual(names, ['a/keep', 'b/old', 'c/new']);
+  assert.equal(after.servers.find((server) => server.name === 'b/old').version, '2.0.0');
+});
+
+test('an incremental pull that finds nothing new leaves the snapshot alone', async () => {
+  mkdirSync(market.CACHE_DIR, { recursive: true });
+  writeFileSync(market.CACHE_PATH, JSON.stringify({
+    cacheVersion: market.CACHE_VERSION,
+    fetchedAt: new Date().toISOString(),
+    count: 2,
+    servers: [market.normalize(entry('a/keep')), market.normalize(entry('b/keep'))],
+  }));
+  market.resetCatalog();
+
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, async json() { return { servers: [], metadata: {} }; } });
+  try {
+    const state = await market.refreshCatalog();
+    assert.equal(state.error, '', 'an empty answer is a real answer here, not a failure');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  market.resetCatalog();
+  assert.equal(market.catalog().count, 2, 'nothing changed means nothing is dropped');
 });
 
 test('card state: installable, needs-config, installed and update are decided on the host', () => {

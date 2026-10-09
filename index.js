@@ -680,13 +680,25 @@ function marketStatusResponse() {
 }
 
 /**
- * Start a snapshot refresh. The pull takes minutes, so it runs detached and the UI polls
- * the status route; the previous snapshot keeps answering searches meanwhile.
+ * Start a snapshot refresh. The pull takes seconds (incremental) or minutes (full), so it
+ * runs detached and the UI polls the status route; the previous snapshot keeps answering
+ * searches meanwhile.
  *
+ * The body selects the mode: `incremental` (the default, asks the registry only for what
+ * changed since the last pull and merges) or `full` (re-reads everything and replaces).
+ *
+ * @param request - the incoming request.
  * @returns the refresh state at the moment the request was accepted.
  */
-function marketRefreshResponse() {
-  if (!market.refreshState().running) void market.refreshCatalog();
+async function marketRefreshResponse(request) {
+  let mode = 'incremental';
+  try {
+    const body = await request.json();
+    if (body !== null && typeof body === 'object' && body.mode === 'full') mode = 'full';
+  } catch {
+    // No body at all is the incremental case, which is the default.
+  }
+  if (!market.refreshState().running) void market.refreshCatalog({ mode });
   return json({ ok: true, value: { refreshing: market.refreshState() } });
 }
 
@@ -926,7 +938,7 @@ export function apply(ctx) {
   register(MARKET_SEARCH_PATH, ['GET', 'HEAD'], async (request) => marketSearchResponse(request));
   register(MARKET_DETAIL_PATH, ['GET', 'HEAD'], async (request, context) => marketDetailResponse(request, context));
   register(MARKET_INSTALLED_PATH, ['GET', 'HEAD'], async (_request, context) => marketInstalledResponse(context));
-  register(MARKET_REFRESH_PATH, ['POST'], async () => marketRefreshResponse());
+  register(MARKET_REFRESH_PATH, ['POST'], (request) => marketRefreshResponse(request));
   register(MARKET_INSTALL_PATH, ['POST'], async (request, context) => marketInstallResponse(request, context));
   register(MARKET_UNINSTALL_PATH, ['POST'], async (request, context) => marketUninstallResponse(request, context));
 }

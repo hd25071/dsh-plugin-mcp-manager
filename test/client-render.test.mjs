@@ -18,6 +18,9 @@ await import('../client.js');
 function steer(value) {
   if (typeof value === 'string' && value === 'rows') return 'market';
   if (typeof value === 'string' && value === '') return 'x/y';
+  // The harness's setState is a no-op, so a state that only shows up after a click has to
+  // start that way: `false` here is the full-re-pull confirmation.
+  if (value === false) return true;
   // Both the status line and the install dialog start from `null`, so one fixture carries
   // both shapes: the status fields the header reads and the detail fields the dialog reads.
   // Reaching both in one pass is what caught a missing helper the preview exposed.
@@ -291,6 +294,36 @@ test('the avatar and the name share one head block', () => {
     assert.match(head, /mcpm-avatar--h\d+/, 'the head holds the avatar');
     assert.match(head, /mcpm-card__name/, 'the head holds the name');
   }
+});
+
+test('colours come from the host tokens, with no theme logic of our own', () => {
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8');
+  // The host pairs a fill with its foreground and owns the light/dark switch. A local
+  // colour alias that re-inverts under a media query is how a button ends up white on
+  // white, so the class table must not carry one.
+  assert.doesNotMatch(source, /prefers-color-scheme/, 'no self-managed theme switch');
+  assert.match(source, /background: var\(--dsw-alias-button-primary-fill/,
+    'the primary button takes its fill from the host');
+  assert.match(source, /color: var\(--dsw-alias-label-primary-foreground/,
+    'and its text from the foreground the host paired with that fill');
+  assert.match(source, /var\(--dsw-alias-state-success-primary/, 'success comes from the host palette');
+  assert.match(source, /var\(--dsw-alias-state-warn-primary/, 'warnings come from the host palette');
+  for (const alias of ['--mcpm-accent', '--mcpm-success', '--mcpm-warning', '--mcpm-danger']) {
+    assert.equal(source.includes(alias), false, 'no local colour alias: ' + alias);
+  }
+});
+
+test('the card is dense and the progress line is not grey', () => {
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8');
+  assert.match(source, /gap: 6px; padding: 12px;/,
+    'a catalog of thousands is read by scanning, so the card stays dense');
+  assert.match(source, /\.mcpm-statusline--progress \{ font-weight: 600; color: var\(--dsw-alias-state-warn-primary/,
+    'the second line answers "can I install right now?" and must read like a warning');
+
+  const text = renderDeep(componentFor('main')({}));
+  assert.match(text, /重新拉取全部 \d+ 条，约需 2 分钟/, 'and it says what it costs before doing it');
+  assert.match(text, /确认/, 'and it waits for a confirmation');
+  assert.match(source, /'全量重拉'/, 'the secondary action that starts it exists');
 });
 
 test('the class table defines every state hook the components use', () => {

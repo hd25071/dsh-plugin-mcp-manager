@@ -85,7 +85,7 @@ window.__ModuleLoader__.load({
       return call(MARKET_SEARCH_ROUTE + '?' + params.toString());
     };
     const marketDetail = (name) => call(MARKET_DETAIL_ROUTE + '?name=' + encodeURIComponent(name));
-    const marketRefresh = () => call(MARKET_REFRESH_ROUTE, { method: 'POST' });
+    const marketRefresh = (mode) => call(MARKET_REFRESH_ROUTE, { method: 'POST', body: { mode: mode === 'full' ? 'full' : 'incremental' } });
     const marketInstall = (name, optionIndex, config, args) => call(MARKET_INSTALL_ROUTE, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -468,19 +468,15 @@ window.__ModuleLoader__.load({
    MCP market class table. This block is the whole visual layer: components carry
    semantic class names and data-state only, so replacing this replaces the look.
 
-   Colours come from the host's own tokens first (verified present in DSH 44, and traced to
-   their final values in dsh-client-ui-theme: the brand colour is a neutral — #0f1115 in
-   light, #f9fafb in dark, with the foreground inverting — while the state colours map to
-   the static palette, green-500 #22c55e / amber-500 #f59e0b / red-500 #ef4444, and are the
-   same in both themes). The fallbacks below mirror those exact values, so a render outside
-   the app matches the app.
+   Colours are referenced from the host's own tokens at each use site, never through a local
+   alias: the host pairs a fill with its foreground and owns the light/dark switch itself, so
+   a local alias that re-inverts is exactly how a button ends up white on white. Traced to
+   their final values in dsh-client-ui-theme: the brand colour is a neutral (#0f1115 light /
+   #f9fafb dark, foreground inverting with it), while the state colours come from the static
+   palette (green-500 #22c55e / amber-500 #f59e0b / red-500 #ef4444) and are the same in both
+   themes. The values in each var() are fallbacks for rendering outside the app, not a theme.
    --------------------------------------------------------------------------- */
 .mcpm-page {
-  --mcpm-accent: var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary, #0f1115));
-  --mcpm-accent-fg: var(--dsw-alias-label-primary-foreground, #ffffff);
-  --mcpm-success: var(--dsw-alias-state-success-primary, #22c55e);
-  --mcpm-warning: var(--dsw-alias-state-warn-primary, #f59e0b);
-  --mcpm-danger: var(--dsw-alias-state-error-primary, #ef4444);
   --mcpm-border: var(--dsw-alias-border-l1, rgba(128, 128, 128, .28));
   --mcpm-border-strong: var(--dsw-alias-border-l2, rgba(128, 128, 128, .4));
   --mcpm-muted: var(--dsw-alias-label-secondary, rgba(128, 128, 128, .95));
@@ -488,13 +484,6 @@ window.__ModuleLoader__.load({
   display: flex; flex-direction: column; gap: 12px; height: 100%; box-sizing: border-box;
   padding: 16px; overflow-y: auto;
   color: var(--dsw-alias-label-primary, inherit); font-size: 13px; line-height: 20px;
-}
-/* Only the accent needs a dark fallback: DSH inverts that one and keeps the states fixed. */
-@media (prefers-color-scheme: dark) {
-  .mcpm-page {
-    --mcpm-accent: var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary, #f9fafb));
-    --mcpm-accent-fg: var(--dsw-alias-label-primary-foreground, #0f1115);
-  }
 }
 /* The search box is sized with flex-basis:100% on a narrow screen, so every box in here
    has to count its padding inside that width or the page scrolls sideways. */
@@ -506,7 +495,10 @@ window.__ModuleLoader__.load({
 @media (max-width: 720px) { .mcpm-search { flex-basis: 100%; } }
 .mcpm-filters { display: flex; gap: 4px; }
 .mcpm-statusline { font-size: 12px; color: var(--mcpm-muted); }
-.mcpm-statusline [data-ok="no"] { color: var(--mcpm-warning); }
+.mcpm-statusline [data-ok="no"] { color: var(--dsw-alias-state-warn-primary, #f59e0b); }
+/* The second line answers "can I install right now?", so it is not more grey text: a
+   half-pulled catalog is a warning, and it reads like one. */
+.mcpm-statusline--progress { font-weight: 600; color: var(--dsw-alias-state-warn-primary, #f59e0b); }
 
 /* sections ----------------------------------------------------------------- */
 .mcpm-section { display: flex; flex-direction: column; gap: 10px; }
@@ -514,11 +506,12 @@ window.__ModuleLoader__.load({
 
 /* card grid ---------------------------------------------------------------- */
 .mcpm-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+/* Density first: a catalog of thousands is read by scanning, not by lingering. */
 .mcpm-card {
-  display: flex; flex-direction: column; gap: 8px; padding: 14px;
+  display: flex; flex-direction: column; gap: 6px; padding: 12px;
   border: .5px solid var(--mcpm-border); border-radius: var(--mcpm-radius);
 }
-.mcpm-card:hover { border-color: var(--mcpm-accent); }
+.mcpm-card:hover { border-color: var(--dsw-alias-button-primary-fill, #0f1115); }
 
 /* The avatar sits inline with the name, a decoration dot rather than a visual subject:
    the first character of a Chinese title carries no identity anyway. Twelve preset hues,
@@ -565,8 +558,8 @@ window.__ModuleLoader__.load({
 }
 /* Version is reference information, so it sinks: it renders last and muted. */
 .mcpm-badge--version { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .75; }
-.mcpm-badge--installed { color: var(--mcpm-success); border-color: var(--mcpm-success); }
-.mcpm-badge--unavailable { color: var(--mcpm-danger); }
+.mcpm-badge--installed { color: var(--dsw-alias-state-success-primary, #22c55e); border-color: var(--dsw-alias-state-success-primary, #22c55e); }
+.mcpm-badge--unavailable { color: var(--dsw-alias-state-error-primary, #ef4444); }
 .mcpm-badge--more { color: var(--mcpm-muted); border-style: dashed; }
 
 /* The sort control is a native select, out of step with the rounded chips and buttons. */
@@ -583,20 +576,20 @@ window.__ModuleLoader__.load({
 /* '--primary' marks the card's main action; the state decides how it looks. */
 .mcpm-btn--primary,
 .mcpm-btn[data-state="idle"], .mcpm-btn[data-state="needs-config"] {
-  background: var(--mcpm-accent); color: var(--mcpm-accent-fg); border: none;
+  background: var(--dsw-alias-button-primary-fill, #0f1115); color: var(--dsw-alias-label-primary-foreground, #ffffff); border: none;
 }
 .mcpm-btn[data-state="installed"] {
-  background: transparent; color: var(--mcpm-success); border: 1px solid var(--mcpm-success);
+  background: transparent; color: var(--dsw-alias-state-success-primary, #22c55e); border: 1px solid var(--dsw-alias-state-success-primary, #22c55e);
 }
 .mcpm-btn[data-state="update"] {
-  background: transparent; color: var(--mcpm-accent); border: 1px solid var(--mcpm-accent);
+  background: transparent; color: var(--dsw-alias-button-primary-fill, #0f1115); border: 1px solid var(--dsw-alias-button-primary-fill, #0f1115);
 }
 .mcpm-btn[data-state="unavailable"] { opacity: .45; cursor: not-allowed; }
 .mcpm-chip {
   font: inherit; cursor: pointer; padding: 2px 10px; border-radius: 999px;
   border: .5px solid var(--mcpm-border); background: transparent; color: var(--mcpm-muted);
 }
-.mcpm-chip[data-active="true"] { color: var(--mcpm-accent); border-color: var(--mcpm-accent); }
+.mcpm-chip[data-active="true"] { color: var(--dsw-alias-button-primary-fill, #0f1115); border-color: var(--dsw-alias-button-primary-fill, #0f1115); }
 
 /* pager, dialog, misc ------------------------------------------------------ */
 .mcpm-pager { display: flex; align-items: center; justify-content: center; gap: 8px; }
@@ -611,9 +604,9 @@ window.__ModuleLoader__.load({
   background: var(--dsw-alias-bg-l2, rgba(128, 128, 128, .08));
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px;
 }
-.mcpm-error { color: var(--mcpm-danger); }
+.mcpm-error { color: var(--dsw-alias-state-error-primary, #ef4444); }
 .mcpm-note { color: var(--mcpm-muted); }
-.mcpm-required { color: var(--mcpm-danger); }
+.mcpm-required { color: var(--dsw-alias-state-error-primary, #ef4444); }
 .mcpm-actions { display: flex; gap: 8px; }
 .mcpm-empty { color: var(--mcpm-muted); margin: 0; }
 .mcpm-navicon { display: block; }
@@ -830,6 +823,7 @@ window.__ModuleLoader__.load({
       const [error, setError] = React.useState('');
       const [dialog, setDialog] = React.useState('');
       const [hint, setHint] = React.useState('');
+      const [confirmFull, setConfirmFull] = React.useState(false);
 
       const loadStatus = React.useCallback(async () => {
         try {
@@ -869,11 +863,11 @@ window.__ModuleLoader__.load({
         return () => clearInterval(timer);
       }, [refreshing, loadStatus]);
 
-      const refresh = async () => {
+      const refresh = async (mode) => {
         setBusy('refresh');
         setError('');
         try {
-          await marketRefresh();
+          await marketRefresh(mode);
           await loadStatus();
         } catch (e) {
           setError(String((e && e.message) || e));
@@ -963,8 +957,15 @@ window.__ModuleLoader__.load({
           ),
           h('button', { type: 'button', className: 'mcpm-btn mcpm-btn--search', 'data-state': 'idle', onClick: () => apply(kind, sort, 0) },
             busy === 'search' ? '搜索中…' : '搜索'),
-          h('button', { type: 'button', className: 'mcpm-btn', 'data-state': refreshing ? 'busy' : 'idle', disabled: refreshing, onClick: refresh },
+          h('button', { type: 'button', className: 'mcpm-btn', 'data-state': refreshing ? 'busy' : 'idle', disabled: refreshing, onClick: () => refresh('incremental'), title: '只拉取上次之后变更的条目，几秒钟' },
             refreshing ? '刷新中…' : '刷新目录'),
+          // A full re-pull is a different question ("is my snapshot still correct") and
+          // costs minutes, so it is a secondary action behind a confirmation.
+          confirmFull
+            ? h('span', { className: 'mcpm-note' }, '重新拉取全部 ' + (status ? status.count : 0) + ' 条，约需 2 分钟：',
+              h('button', { type: 'button', className: 'mcpm-btn', 'data-state': 'idle', disabled: refreshing, onClick: () => { setConfirmFull(false); refresh('full'); } }, '确认'),
+              h('button', { type: 'button', className: 'mcpm-btn', onClick: () => setConfirmFull(false) }, '取消'))
+            : h('button', { type: 'button', className: 'mcpm-btn', disabled: refreshing, onClick: () => setConfirmFull(true), title: '重新读取整个注册表，替换本地快照' }, '全量重拉'),
         ),
 
         h('div', { className: 'mcpm-statusline' },
@@ -973,16 +974,19 @@ window.__ModuleLoader__.load({
             : '读取目录状态…',
           runtimeBits.map(([name, available]) =>
             h('span', { key: name, 'data-ok': available ? 'yes' : 'no' }, name + (available ? ' 可用' : ' 缺失') + '  ')),
-          status && status.source === 'none'
-            ? h('div', null, '还没有本地快照，点「刷新目录」拉一次全量（约 100 秒，之后都是本地搜索）。')
-            : null,
-          refreshing
-            ? h('div', null, '正在后台拉取：已 ' + status.refreshing.pages + ' 页 / ' + status.refreshing.rawEntries + ' 条，保留 ' + status.refreshing.kept + ' 个服务器。')
-            : null,
-          status && status.refreshing && status.refreshing.error
-            ? h('div', { className: 'mcpm-error' }, '上次刷新失败：' + status.refreshing.error + '（继续使用本地快照）')
-            : null,
         ),
+        status && status.source === 'none'
+          ? h('div', { className: 'mcpm-statusline' }, '还没有本地快照，点「刷新目录」拉一次全量（约 100 秒，之后都是本地搜索）。')
+          : null,
+        refreshing
+          ? h('div', { className: 'mcpm-statusline mcpm-statusline--progress' },
+            '正在后台' + (status.refreshing.mode === 'full' ? '全量重拉' : '增量更新') + '：已 ' + status.refreshing.pages + ' 页 / ' + status.refreshing.rawEntries + ' 条，'
+            + (status.refreshing.mode === 'full' ? '保留 ' + status.refreshing.kept + ' 个服务器' : '变更 ' + status.refreshing.kept + ' 条')
+            + '。目录尚不完整，装完即用的条目可能还没进来。')
+          : null,
+        status && status.refreshing && status.refreshing.error
+          ? h('div', { className: 'mcpm-error' }, '上次刷新失败：' + status.refreshing.error + '（继续使用本地快照）')
+          : null,
 
         error ? h('div', { className: 'mcpm-error' }, error) : null,
         hint ? h('div', { className: 'mcpm-note' }, hint) : null,
