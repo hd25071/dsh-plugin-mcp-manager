@@ -475,8 +475,7 @@ window.__ModuleLoader__.load({
    --dsw-radius-md). The fallbacks are only for rendering outside the app.
    --------------------------------------------------------------------------- */
 .mcpm-page {
-  --mcpm-accent: var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary, #3b6de0));
-  --mcpm-accent-fg: var(--dsw-alias-label-primary-foreground, #ffffff);
+  --mcpm-accent: var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary, #3b6de0));  --mcpm-accent-fg: var(--dsw-alias-label-primary-foreground, #ffffff);
   --mcpm-success: var(--dsw-alias-state-success-primary, var(--mcpm-success-fb, #1a7f37));
   --mcpm-warning: var(--dsw-alias-state-warn-primary, var(--mcpm-warning-fb, #9a6700));
   --mcpm-danger: var(--dsw-alias-state-error-primary, #c0392b);
@@ -493,6 +492,9 @@ window.__ModuleLoader__.load({
 @media (prefers-color-scheme: dark) {
   .mcpm-page { --mcpm-success-fb: #3fb950; --mcpm-warning-fb: #d29922; }
 }
+/* The search box is sized with flex-basis:100% on a narrow screen, so every box in here
+   has to count its padding inside that width or the page scrolls sideways. */
+.mcpm-page, .mcpm-page * { box-sizing: border-box; }
 
 /* toolbar ------------------------------------------------------------------ */
 .mcpm-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
@@ -514,13 +516,21 @@ window.__ModuleLoader__.load({
 }
 .mcpm-card:hover { border-color: var(--mcpm-accent); }
 
-/* Letter avatar: 12 preset hues, chosen by a hash of the name. No remote icon is ever
-   fetched, and the hue arrives as a class so the markup stays style-free. */
+/* The avatar sits inline with the name, a decoration dot rather than a visual subject:
+   the first character of a Chinese title carries no identity anyway. Twelve preset hues,
+   chosen by a hash of the name; no remote icon is ever fetched, and the hue arrives as a
+   class so the markup stays style-free. */
+.mcpm-card__head { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .mcpm-card__icon {
+  flex: 0 0 28px; width: 28px; height: 28px;
   display: flex; align-items: center; justify-content: center;
-  width: 28px; height: 28px; border-radius: var(--mcpm-radius);
-  font-weight: 600; text-transform: uppercase;
+  border-radius: 8px; font-size: 13px; font-weight: 600; text-transform: uppercase;
   border: .5px solid var(--mcpm-border);
+}
+.mcpm-card__name {
+  flex: 1; min-width: 0; margin: 0;
+  font-size: 14px; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .mcpm-avatar--h0 { color: hsl(0 65% 45%); background: color-mix(in srgb, hsl(0 65% 45%) 14%, transparent); }
 .mcpm-avatar--h1 { color: hsl(30 65% 42%); background: color-mix(in srgb, hsl(30 65% 42%) 14%, transparent); }
@@ -535,10 +545,6 @@ window.__ModuleLoader__.load({
 .mcpm-avatar--h10 { color: hsl(300 55% 45%); background: color-mix(in srgb, hsl(300 55% 45%) 14%, transparent); }
 .mcpm-avatar--h11 { color: hsl(330 60% 45%); background: color-mix(in srgb, hsl(330 60% 45%) 14%, transparent); }
 
-.mcpm-card__name {
-  font-size: 14px; font-weight: 600; margin: 0;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
 .mcpm-card__desc {
   font-size: 12.5px; color: var(--mcpm-muted); margin: 0;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
@@ -553,9 +559,17 @@ window.__ModuleLoader__.load({
   font-size: 11px; padding: 1px 8px; border-radius: 999px;
   border: .5px solid var(--mcpm-border); color: var(--mcpm-muted);
 }
-.mcpm-badge--version { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .8; }
+/* Version is reference information, so it sinks: it renders last and muted. */
+.mcpm-badge--version { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .75; }
 .mcpm-badge--installed { color: var(--mcpm-success); border-color: var(--mcpm-success); }
 .mcpm-badge--unavailable { color: var(--mcpm-danger); }
+.mcpm-badge--more { color: var(--mcpm-muted); border-style: dashed; }
+
+/* The sort control is a native select, out of step with the rounded chips and buttons. */
+.mcpm-select { border-radius: var(--mcpm-radius); padding: 3px 7px; border: .5px solid var(--mcpm-border-strong); background: transparent; color: inherit; }
+
+/* On a narrow screen the Enter key searches fine, so the button is redundant. */
+@media (max-width: 720px) { .mcpm-btn--search { display: none; } }
 
 /* buttons: the state machine's visual translation --------------------------- */
 .mcpm-btn {
@@ -703,11 +717,23 @@ window.__ModuleLoader__.load({
       return text.slice(0, 1) || '?';
     }
 
+    /** The short badge text for a transport: the long form wraps on a narrow screen. */
+    function transportLabelOf(kind) {
+      return kind === 'streamable-http' ? 'http' : kind;
+    }
+
+    /** Cap a chip list at three, folding the rest into a `+N` chip. */
+    function badgeItems(chips) {
+      const visible = chips.filter(Boolean);
+      if (visible.length <= 3) return visible;
+      return [...visible.slice(0, 3), h('span', { key: 'more', className: 'mcpm-badge mcpm-badge--more' }, '+' + String(visible.length - 3))];
+    }
+
     /**
      * One catalog card.
      *
-     * Five semantic blocks in a fixed order — icon, name, description, badges, actions.
-     * The visual spec may rearrange them in CSS; the structure does not change.
+     * Four semantic blocks in a fixed order — head (avatar + name), description, badges,
+     * actions. The visual spec may rearrange them in CSS; the structure does not change.
      */
     function MarketCard(props) {
       const { card, onInstall, onUninstall, onOpenInstalled } = props;
@@ -718,15 +744,20 @@ window.__ModuleLoader__.load({
         onInstall(card);
       };
       return h('article', { className: 'mcpm-card', 'data-state': state },
-        h('div', { className: avatarClassOf(card.name), 'aria-hidden': 'true' }, avatarLetterOf(card.title || card.name)),
-        h('h3', { className: 'mcpm-card__name' }, card.title || card.name),
+        h('div', { className: 'mcpm-card__head' },
+          h('div', { className: avatarClassOf(card.name), 'aria-hidden': 'true' }, avatarLetterOf(card.title || card.name)),
+          h('h3', { className: 'mcpm-card__name' }, card.title || card.name),
+        ),
         h('p', { className: 'mcpm-card__desc' }, card.description || '（无描述）'),
         h('div', { className: 'mcpm-card__badges' },
-          h('span', { className: 'mcpm-badge mcpm-badge--kind' }, card.registryType || (card.hasRemote ? 'remote' : '—')),
-          (card.kinds || []).map((kind) => h('span', { key: kind, className: 'mcpm-badge mcpm-badge--transport' }, kind)),
-          card.version ? h('span', { className: 'mcpm-badge mcpm-badge--version' }, 'v' + card.version) : null,
-          card.installedSlug ? h('span', { className: 'mcpm-badge mcpm-badge--installed' }, '已装') : null,
-          state === 'unavailable' ? h('span', { className: 'mcpm-badge mcpm-badge--unavailable' }, '不可用') : null,
+          badgeItems([
+            h('span', { key: 'kind', className: 'mcpm-badge mcpm-badge--kind' }, card.registryType || (card.hasRemote ? 'remote' : '—')),
+            ...(card.kinds || []).map((kind) => h('span', { key: kind, className: 'mcpm-badge mcpm-badge--transport' }, transportLabelOf(kind))),
+            // The button already says 已安装 ✓, so a 已装 badge would only repeat it.
+            state === 'unavailable' ? h('span', { key: 'unavailable', className: 'mcpm-badge mcpm-badge--unavailable' }, '不可用') : null,
+            // Version is reference information, so it renders last.
+            card.version ? h('span', { key: 'version', className: 'mcpm-badge mcpm-badge--version' }, 'v' + card.version) : null,
+          ]),
         ),
         h('div', { className: 'mcpm-card__actions' },
           h('button', {
@@ -746,19 +777,23 @@ window.__ModuleLoader__.load({
       const { item, busy, onUninstall } = props;
       const state = item.updateAvailable ? 'update' : 'installed';
       return h('article', { className: 'mcpm-card mcpm-card--installed', 'data-state': state },
-        h('div', { className: avatarClassOf(item.registryName), 'aria-hidden': 'true' }, avatarLetterOf(item.registryTitle || item.registryName)),
-        h('h3', { className: 'mcpm-card__name' }, item.registryTitle || item.registryName),
+        h('div', { className: 'mcpm-card__head' },
+          h('div', { className: avatarClassOf(item.registryName), 'aria-hidden': 'true' }, avatarLetterOf(item.registryTitle || item.registryName)),
+          h('h3', { className: 'mcpm-card__name' }, item.registryTitle || item.registryName),
+        ),
         h('p', { className: 'mcpm-card__desc' },
           item.kind === 'http' ? item.url : [item.command, ...(item.args || [])].join(' ')),
         h('div', { className: 'mcpm-card__badges' },
-          h('span', { className: 'mcpm-badge mcpm-badge--kind' }, item.kind === 'http' ? 'remote' : item.registryType),
-          h('span', { className: 'mcpm-badge mcpm-badge--state' }, STATE_LABEL[item.state] || item.state),
-          item.toolCount === null || item.toolCount === undefined
-            ? null
-            : h('span', { className: 'mcpm-badge mcpm-badge--tools' }, '✓ ' + item.toolCount + ' 个工具'),
-          item.updateAvailable
-            ? h('span', { className: 'mcpm-badge mcpm-badge--update' }, '目录版本 v' + item.latestVersion)
-            : null,
+          badgeItems([
+            h('span', { key: 'kind', className: 'mcpm-badge mcpm-badge--kind' }, item.kind === 'http' ? 'remote' : item.registryType),
+            h('span', { key: 'state', className: 'mcpm-badge mcpm-badge--state' }, STATE_LABEL[item.state] || item.state),
+            item.updateAvailable
+              ? h('span', { key: 'update', className: 'mcpm-badge mcpm-badge--update' }, '目录版本 v' + item.latestVersion)
+              : null,
+            item.toolCount === null || item.toolCount === undefined
+              ? null
+              : h('span', { key: 'tools', className: 'mcpm-badge mcpm-badge--tools' }, '✓ ' + item.toolCount + ' 个工具'),
+          ]),
         ),
         h('div', { className: 'mcpm-card__actions' },
           h('button', {
@@ -922,7 +957,7 @@ window.__ModuleLoader__.load({
             h('option', { value: 'newest' }, '最新上架'),
             h('option', { value: 'name' }, '名称'),
           ),
-          h('button', { type: 'button', className: 'mcpm-btn', 'data-state': 'idle', onClick: () => apply(kind, sort, 0) },
+          h('button', { type: 'button', className: 'mcpm-btn mcpm-btn--search', 'data-state': 'idle', onClick: () => apply(kind, sort, 0) },
             busy === 'search' ? '搜索中…' : '搜索'),
           h('button', { type: 'button', className: 'mcpm-btn', 'data-state': refreshing ? 'busy' : 'idle', disabled: refreshing, onClick: refresh },
             refreshing ? '刷新中…' : '刷新目录'),
