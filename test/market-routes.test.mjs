@@ -298,6 +298,35 @@ test('search paginates and decorates every card with its state', async () => {
   assert.equal(second.body.value.results[0].name !== first.body.value.results[0].name, true, 'page two must not repeat page one');
 });
 
+test('a search result reflects that the entry is already installed', async () => {
+  seedCache();
+  const { routes } = makeCtx();
+
+  const before = await call(routes, host.MARKET_SEARCH_PATH, host.MARKET_SEARCH_PATH + '?q=notes');
+  assert.equal(before.body.value.results[0].installedSlug, '', 'not installed yet');
+  assert.equal(before.body.value.results[0].updateAvailable, false);
+
+  const installed = await call(routes, host.MARKET_INSTALL_PATH, host.MARKET_INSTALL_PATH,
+    post({ name: 'vendor.example/notes', config: { EXAMPLE_API_KEY: 'k' } }));
+  assert.equal(installed.status, 200);
+  const slug = installed.body.value.slug;
+
+  // The same entry, searched again: the card must now say it is installed, or a user
+  // clicking 安装 again would silently start an overwrite instead of opening the row.
+  const after = await call(routes, host.MARKET_SEARCH_PATH, host.MARKET_SEARCH_PATH + '?q=notes');
+  assert.equal(after.body.value.results[0].installedSlug, slug);
+  assert.equal(after.body.value.results[0].updateAvailable, false, 'same version is not an update');
+
+  // And when the registry moves on, the same card says so.
+  const cache = JSON.parse(readFileSync(market.CACHE_PATH, 'utf8'));
+  cache.servers = cache.servers.map((server) => (server.name === 'vendor.example/notes' ? { ...server, version: '7.7.7' } : server));
+  writeFileSync(market.CACHE_PATH, JSON.stringify(cache));
+  market.resetCatalog();
+  const moved = await call(routes, host.MARKET_SEARCH_PATH, host.MARKET_SEARCH_PATH + '?q=notes');
+  assert.equal(moved.body.value.results[0].installedSlug, slug);
+  assert.equal(moved.body.value.results[0].updateAvailable, true);
+});
+
 test('the installed list compares versions by inequality only', async () => {
   seedCache();
   const { routes } = makeCtx();

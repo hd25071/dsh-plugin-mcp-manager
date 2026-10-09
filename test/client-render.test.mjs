@@ -43,17 +43,20 @@ function steer(value) {
       }],
       blocked: [{ registryType: 'oci', identifier: 'ghcr.io/x', reason: '容器方式（oci）二期支持' }],
       slug: 'vendor-example-notes-000000',
+      pkg: '@dsh-mcp-market/vendor-example-notes-000000',
+      dir: 'C:/market/vendor-example-notes-000000',
       serverName: 'notes',
     };
   }
   // The search result state, so the grid renders real cards in every state.
   if (value !== null && typeof value === 'object' && Array.isArray(value.results) && value.results.length === 0) {
     return {
-      total: 3,
+      total: 4,
       offset: 0,
       results: [
         { name: 'vendor.example/notes', title: 'Vendor Notes', description: 'a local one', version: '1.0.0', types: ['npm'], hasRemote: false, kinds: [], installable: true, needsConfig: false, installedSlug: '', updateAvailable: false },
         { name: 'vendor.example/keyed', title: 'Vendor Keyed', description: 'needs a key', version: '2.0.0', types: ['npm'], hasRemote: false, kinds: [], installable: true, needsConfig: true, installedSlug: '', updateAvailable: false },
+        { name: 'vendor.example/installed', title: 'Vendor Installed', description: 'already here', version: '1.4.0', types: ['npm'], hasRemote: false, kinds: [], installable: true, needsConfig: false, installedSlug: 'vendor-example-installed-000000', updateAvailable: false },
         { name: 'vendor.example/legacy-sse', title: 'Vendor SSE', description: 'sse only', version: '1.0.0', types: [], hasRemote: true, kinds: ['sse'], installable: false, unsupportedReason: '暂不支持 sse 远程传输（二期）', installedSlug: '', updateAvailable: false },
       ],
     };
@@ -74,10 +77,12 @@ const React = {
 };
 
 const registered = [];
+const navigationCalls = [];
 function makeScope(extra) {
   const scope = {
     effect: (fn) => fn(),
-    get: () => undefined,
+    // The plugin page's published navigation, so the installed-card jump can be observed.
+    get: (key) => (key === 'pluginNavigation' ? { openBundle: (pkg) => navigationCalls.push(pkg) } : undefined),
     slots: {
       inject: (name, callback) => callback(),
       register: (descriptor, component) => {
@@ -156,7 +161,7 @@ test('the market page renders the toolbar, the grid and the pager', () => {
   assert.match(text, /远程/);
   assert.match(text, /最新上架/);
   assert.match(text, /刷新目录/);
-  assert.match(text, /搜索结果（3）/);
+  assert.match(text, /搜索结果（4）/);
   assert.match(text, /上一页/);
   assert.match(text, /下一页/);
   assert.match(text, /每页 60/, 'pagination size must be visible');
@@ -192,6 +197,69 @@ test('the market markup is class-based: semantic classes and data-state, never i
   }
 });
 
+test('every card carries a letter avatar from a fixed hue set', () => {
+  const hues = new Set();
+  const letters = [];
+  const walk = (element, depth = 0) => {
+    if (depth > 24 || element === null || element === undefined || typeof element !== 'object') return;
+    if (Array.isArray(element)) { for (const child of element) walk(child, depth + 1); return; }
+    const props = element.props || {};
+    if (typeof props.className === 'string') {
+      for (const name of props.className.split(/\s+/)) {
+        const match = /^mcpm-avatar--h(\d+)$/.exec(name);
+        if (match) {
+          hues.add(Number(match[1]));
+          letters.push((element.children || []).filter((child) => typeof child === 'string').join(''));
+        }
+      }
+    }
+    if (typeof element.type === 'function') walk(element.type(props), depth + 1);
+    for (const child of element.children || []) walk(child, depth + 1);
+  };
+  walk(componentFor('main')({}));
+
+  assert.equal(hues.size > 1, true, 'a wall of one hue gives no sense of which card is which');
+  for (const hue of hues) assert.equal(hue >= 0 && hue <= 11, true, 'hue must come from the 12 preset classes');
+  assert.equal(letters.every((letter) => letter.length === 1), true, 'each avatar shows exactly one letter: ' + JSON.stringify(letters));
+  // The class table has to define every hue the markup can ask for.
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8');
+  for (let hue = 0; hue < 12; hue += 1) {
+    assert.equal(source.includes('.mcpm-avatar--h' + hue + ' '), true, 'the class table must define hue ' + hue);
+  }
+});
+
+test('an installed card jumps to the row through the published navigation', () => {
+  const page = componentFor('main')({});
+  let clicked = false;
+  const walk = (element, depth = 0) => {
+    if (clicked || depth > 24 || element === null || element === undefined || typeof element !== 'object') return;
+    if (Array.isArray(element)) { for (const child of element) walk(child, depth + 1); return; }
+    const props = element.props || {};
+    if (element.type === 'button' && props['data-state'] === 'installed' && typeof props.onClick === 'function') {
+      props.onClick();
+      clicked = true;
+      return;
+    }
+    if (typeof element.type === 'function') walk(element.type(props), depth + 1);
+    for (const child of element.children || []) walk(child, depth + 1);
+  };
+  walk(page);
+
+  assert.equal(clicked, true, 'an installed card must render a clickable installed-state button');
+  assert.deepEqual(navigationCalls, ['@dsh-mcp-market/vendor-example-installed-000000'],
+    'the click must open that bundle in the plugin page, not just print a hint');
+});
+
+test('the result title says what is actually listed', () => {
+  // The steered pass carries a query, so the title must say 搜索结果 and the real count.
+  const text = renderDeep(componentFor('main')({}));
+  assert.match(text, /搜索结果（4）/, 'with a query the title says 搜索结果');
+  // The other branch is wording only; the steered pass cannot carry an empty query and an
+  // open dialog at once, so it is asserted at the source.
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8');
+  assert.match(source, /query\.trim\(\) === '' \? '全部服务器' : '搜索结果'/,
+    'with no query the list is everything, and the title must say so');
+});
 test('the class table defines every state hook the components use', () => {
   const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8');
   for (const selector of ['.mcpm-card', '.mcpm-grid', '.mcpm-btn--primary', '.mcpm-badge', '.mcpm-pager', '[data-state=']) {

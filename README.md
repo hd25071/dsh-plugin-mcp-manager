@@ -101,6 +101,38 @@ package.json
 **分页而不是虚拟滚动**：7287 条卡片全量渲染必卡，而市场带排序/筛选，虚拟滚动与之联动最容易出 bug。
 每页 60，`limit`/`offset` 走宿主路由，页码与总数显示在页脚。
 
+### 视觉层用的都是宿主 token（不是自编色板）
+
+先 grep 过 DSH 的 token 表，这些**确实存在**，所以颜色第一优先级全部走宿主变量，自编色值只作为 `var()` 兜底：
+
+| 用途 | token |
+| --- | --- |
+| 主按钮（安装）底色 / 字色 | `--dsw-alias-button-primary-fill`（兜底 `--dsw-alias-brand-primary`）/ `--dsw-alias-label-primary-foreground` |
+| 成功（已安装） | `--dsw-alias-state-success-primary` |
+| 警告（运行时缺失） | `--dsw-alias-state-warn-primary` |
+| 危险（不可用/错误） | `--dsw-alias-state-error-primary` |
+| 边框（**0.5px 发丝**，与官方 UI 一致） | `--dsw-alias-border-l1` / `--dsw-alias-border-l2` |
+| 次级文字 | `--dsw-alias-label-secondary` |
+| 圆角 | `--dsw-radius-md` |
+
+**字母头像**：7287 张卡片若都是同一个图标就毫无区分度，而远程图标 URL 是不可信内容、绝不自动加载。
+折中是"名称首字母 + 名称哈希选 12 个预设色相"（`.mcpm-avatar--h0`…`h11`，各用 `color-mix` 出 14% 背景），
+**色相以 class 形式出现，markup 里仍然零内联 style**。
+
+### 已安装条目 → 跳回管理视图
+
+插件页把导航**发布成了服务**（`dsh-client-ui-plugin-manager/lib/client.js:3758`）：
+
+```js
+ctx.reflect.provide("pluginNavigation", {
+  openBundle: (packageName) => { ctx.layout.selectPanel(PANEL_ID); instance.actions.setView({ kind: "package", name: packageName }); },
+});
+```
+
+反射发布的值就是普通服务（`loader` 也是这么发布的，`cordis-plugin-loader:603`，全项目都用 `ctx.get`/`inject` 读），
+所以本插件用 `ctx.get('pluginNavigation')` 拿它、点已安装卡片时调 `openBundle('@dsh-mcp-market/<slug>')`：
+**切到「插件」面板并打开该组合包页**。取不到时降级成一行文字提示，不碰宿主内部 API。
+
 ### 市场是怎么落地的（设计要点）
 
 ```text

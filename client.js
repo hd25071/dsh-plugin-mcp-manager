@@ -98,10 +98,45 @@ window.__ModuleLoader__.load({
     });
 
     /**
-     * The sidebar controller, captured in `apply`. The manager page uses it to open
-     * the call-log tab; the tab itself reads nothing from it.
+     * The sidebar controller and the plugin context, captured in `apply`.
+     *
+     * The manager page uses the controller to open the call-log tab; the market page uses
+     * the context to resolve the plugin page's navigation lazily.
      */
-    const dock = { sidebarRight: null };
+    const dock = { sidebarRight: null, ctx: null };
+
+    /**
+     * The plugin page's published navigation, when this profile mounts it.
+     *
+     * `dsh-client-ui-plugin-manager` publishes `pluginNavigation` through the reflection
+     * seam (`lib/client.js:3758`): `openBundle(pkg)` switches the left nav to the Plugins
+     * panel and opens that bundle's page. Reflection-published values are ordinary
+     * services — the loader publishes itself the same way (`cordis-plugin-loader:603`) and
+     * every reader reaches it through `ctx.get` / `ctx.inject` — so `ctx.get` is the whole
+     * story, and no bare property read is needed.
+     *
+     * Resolved lazily and defensively: the service may not be mounted when this plugin
+     * activates, and a missing service must cost a convenience jump, never a render.
+     *
+     * @returns the navigation service, or `null`.
+     */
+    function pluginNavigation() {
+      const ctx = dock.ctx;
+      if (ctx === null || ctx === undefined) return null;
+      try {
+        if (typeof ctx.get !== 'function') return null;
+        const value = ctx.get('pluginNavigation');
+        return value === undefined ? null : value;
+      } catch {
+        /* not published in this profile */
+        return null;
+      }
+    }
+
+    /** The bundle package name behind one installed market entry. */
+    function packageOfSlug(slug) {
+      return '@dsh-mcp-market/' + String(slug);
+    }
 
     // -------------------------------------------------------------------- helpers
 
@@ -429,36 +464,141 @@ window.__ModuleLoader__.load({
      * the visual spec fills in.
      */
     const MARKET_CSS = `
-.mcpm-page { display: flex; flex-direction: column; gap: 12px; height: 100%; box-sizing: border-box; padding: 16px; overflow-y: auto; }
+/* ---------------------------------------------------------------------------
+   MCP market class table. This block is the whole visual layer: components carry
+   semantic class names and data-state only, so replacing this replaces the look.
+
+   Colours come from the host's own tokens first (verified present in DSH 44:
+   --dsw-alias-button-primary-fill, --dsw-alias-label-primary-foreground,
+   --dsw-alias-state-success-primary, --dsw-alias-state-warn-primary,
+   --dsw-alias-state-error-primary, --dsw-alias-border-l1, --dsw-alias-label-secondary,
+   --dsw-radius-md). The fallbacks are only for rendering outside the app.
+   --------------------------------------------------------------------------- */
+.mcpm-page {
+  --mcpm-accent: var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary, #3b6de0));
+  --mcpm-accent-fg: var(--dsw-alias-label-primary-foreground, #ffffff);
+  --mcpm-success: var(--dsw-alias-state-success-primary, var(--mcpm-success-fb, #1a7f37));
+  --mcpm-warning: var(--dsw-alias-state-warn-primary, var(--mcpm-warning-fb, #9a6700));
+  --mcpm-danger: var(--dsw-alias-state-error-primary, #c0392b);
+  --mcpm-border: var(--dsw-alias-border-l1, rgba(128, 128, 128, .28));
+  --mcpm-border-strong: var(--dsw-alias-border-l2, rgba(128, 128, 128, .4));
+  --mcpm-muted: var(--dsw-alias-label-secondary, rgba(128, 128, 128, .95));
+  --mcpm-radius: var(--dsw-radius-md, 10px);
+  --mcpm-success-fb: #1a7f37;
+  --mcpm-warning-fb: #9a6700;
+  display: flex; flex-direction: column; gap: 12px; height: 100%; box-sizing: border-box;
+  padding: 16px; overflow-y: auto;
+  color: var(--dsw-alias-label-primary, inherit); font-size: 13px; line-height: 20px;
+}
+@media (prefers-color-scheme: dark) {
+  .mcpm-page { --mcpm-success-fb: #3fb950; --mcpm-warning-fb: #d29922; }
+}
+
+/* toolbar ------------------------------------------------------------------ */
 .mcpm-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.mcpm-search { flex: 1 1 240px; }
+.mcpm-search { flex: 1 1 220px; min-width: 0; }
+@media (max-width: 720px) { .mcpm-search { flex-basis: 100%; } }
 .mcpm-filters { display: flex; gap: 4px; }
-.mcpm-status { line-height: 1.7; }
+.mcpm-statusline { font-size: 12px; color: var(--mcpm-muted); }
+.mcpm-statusline [data-ok="no"] { color: var(--mcpm-warning); }
+
+/* sections ----------------------------------------------------------------- */
 .mcpm-section { display: flex; flex-direction: column; gap: 10px; }
-.mcpm-section-title { font-weight: 600; }
+.mcpm-result-title { font-size: 14px; font-weight: 600; margin: 0; }
+
+/* card grid ---------------------------------------------------------------- */
 .mcpm-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
-.mcpm-card { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.28)); border-radius: 8px; padding: 12px; }
-.mcpm-card__icon { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.35)); }
-.mcpm-card__name { font-weight: 600; overflow-wrap: anywhere; }
-.mcpm-card__desc { color: var(--dsw-alias-text-secondary, inherit); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.mcpm-card__badges { display: flex; flex-wrap: wrap; gap: 4px; }
-.mcpm-card__actions { margin-top: auto; display: flex; gap: 6px; }
-.mcpm-badge { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.35)); color: var(--dsw-alias-text-secondary, inherit); }
-.mcpm-btn { font: inherit; cursor: pointer; padding: 3px 10px; border-radius: 6px; border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.4)); background: transparent; color: inherit; }
-.mcpm-btn--primary { border-color: var(--dsw-alias-border, rgba(128,128,128,.5)); background: var(--dsw-alias-bg-secondary, rgba(128,128,128,.12)); }
-.mcpm-btn[data-state="unavailable"] { cursor: not-allowed; color: var(--dsw-alias-text-secondary, inherit); }
-.mcpm-chip { font: inherit; cursor: pointer; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.35)); background: transparent; color: inherit; }
-.mcpm-chip[data-active="true"] { background: var(--dsw-alias-bg-secondary, rgba(128,128,128,.12)); }
+.mcpm-card {
+  display: flex; flex-direction: column; gap: 8px; padding: 14px;
+  border: .5px solid var(--mcpm-border); border-radius: var(--mcpm-radius);
+}
+.mcpm-card:hover { border-color: var(--mcpm-accent); }
+
+/* Letter avatar: 12 preset hues, chosen by a hash of the name. No remote icon is ever
+   fetched, and the hue arrives as a class so the markup stays style-free. */
+.mcpm-card__icon {
+  display: flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: var(--mcpm-radius);
+  font-weight: 600; text-transform: uppercase;
+  border: .5px solid var(--mcpm-border);
+}
+.mcpm-avatar--h0 { color: hsl(0 65% 45%); background: color-mix(in srgb, hsl(0 65% 45%) 14%, transparent); }
+.mcpm-avatar--h1 { color: hsl(30 65% 42%); background: color-mix(in srgb, hsl(30 65% 42%) 14%, transparent); }
+.mcpm-avatar--h2 { color: hsl(60 55% 35%); background: color-mix(in srgb, hsl(60 55% 35%) 14%, transparent); }
+.mcpm-avatar--h3 { color: hsl(90 55% 33%); background: color-mix(in srgb, hsl(90 55% 33%) 14%, transparent); }
+.mcpm-avatar--h4 { color: hsl(120 55% 33%); background: color-mix(in srgb, hsl(120 55% 33%) 14%, transparent); }
+.mcpm-avatar--h5 { color: hsl(150 55% 32%); background: color-mix(in srgb, hsl(150 55% 32%) 14%, transparent); }
+.mcpm-avatar--h6 { color: hsl(180 55% 32%); background: color-mix(in srgb, hsl(180 55% 32%) 14%, transparent); }
+.mcpm-avatar--h7 { color: hsl(210 65% 45%); background: color-mix(in srgb, hsl(210 65% 45%) 14%, transparent); }
+.mcpm-avatar--h8 { color: hsl(240 55% 50%); background: color-mix(in srgb, hsl(240 55% 50%) 14%, transparent); }
+.mcpm-avatar--h9 { color: hsl(270 55% 50%); background: color-mix(in srgb, hsl(270 55% 50%) 14%, transparent); }
+.mcpm-avatar--h10 { color: hsl(300 55% 45%); background: color-mix(in srgb, hsl(300 55% 45%) 14%, transparent); }
+.mcpm-avatar--h11 { color: hsl(330 60% 45%); background: color-mix(in srgb, hsl(330 60% 45%) 14%, transparent); }
+
+.mcpm-card__name {
+  font-size: 14px; font-weight: 600; margin: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.mcpm-card__desc {
+  font-size: 12.5px; color: var(--mcpm-muted); margin: 0;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; min-height: 2.6em;
+}
+/* margin-top:auto is what keeps badges and the action on one line across a row. */
+.mcpm-card__badges { margin-top: auto; display: flex; flex-wrap: wrap; gap: 6px; }
+.mcpm-card__actions { display: flex; gap: 6px; }
+
+/* badges ------------------------------------------------------------------- */
+.mcpm-badge {
+  font-size: 11px; padding: 1px 8px; border-radius: 999px;
+  border: .5px solid var(--mcpm-border); color: var(--mcpm-muted);
+}
+.mcpm-badge--version { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .8; }
+.mcpm-badge--installed { color: var(--mcpm-success); border-color: var(--mcpm-success); }
+.mcpm-badge--unavailable { color: var(--mcpm-danger); }
+
+/* buttons: the state machine's visual translation --------------------------- */
+.mcpm-btn {
+  font: inherit; cursor: pointer; padding: 3px 10px; border-radius: var(--mcpm-radius);
+  border: .5px solid var(--mcpm-border-strong); background: transparent; color: inherit;
+}
+/* '--primary' marks the card's main action; the state decides how it looks. */
+.mcpm-btn--primary,
+.mcpm-btn[data-state="idle"], .mcpm-btn[data-state="needs-config"] {
+  background: var(--mcpm-accent); color: var(--mcpm-accent-fg); border: none;
+}
+.mcpm-btn[data-state="installed"] {
+  background: transparent; color: var(--mcpm-success); border: 1px solid var(--mcpm-success);
+}
+.mcpm-btn[data-state="update"] {
+  background: transparent; color: var(--mcpm-accent); border: 1px solid var(--mcpm-accent);
+}
+.mcpm-btn[data-state="unavailable"] { opacity: .45; cursor: not-allowed; }
+.mcpm-chip {
+  font: inherit; cursor: pointer; padding: 2px 10px; border-radius: 999px;
+  border: .5px solid var(--mcpm-border); background: transparent; color: var(--mcpm-muted);
+}
+.mcpm-chip[data-active="true"] { color: var(--mcpm-accent); border-color: var(--mcpm-accent); }
+
+/* pager, dialog, misc ------------------------------------------------------ */
 .mcpm-pager { display: flex; align-items: center; justify-content: center; gap: 8px; }
-.mcpm-dialog { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--dsw-alias-border, rgba(128,128,128,.5)); border-radius: 8px; padding: 12px; }
+.mcpm-dialog {
+  display: flex; flex-direction: column; gap: 8px; padding: 14px;
+  border: .5px solid var(--mcpm-border-strong); border-radius: var(--mcpm-radius);
+}
 .mcpm-field { display: grid; grid-template-columns: 150px 1fr; align-items: center; gap: 8px; }
 .mcpm-field__label { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.mcpm-pre { margin: 0; padding: 8px; border-radius: 6px; overflow-x: auto; background: var(--dsw-alias-bg-secondary, rgba(128,128,128,.08)); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
-.mcpm-error { color: var(--dsw-alias-text-danger, #c0392b); }
-.mcpm-note { color: var(--dsw-alias-text-secondary, inherit); line-height: 1.7; }
-.mcpm-required { color: var(--dsw-alias-text-danger, #c0392b); }
+.mcpm-pre {
+  margin: 0; padding: 8px; border-radius: var(--mcpm-radius); overflow-x: auto;
+  background: var(--dsw-alias-bg-l2, rgba(128, 128, 128, .08));
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px;
+}
+.mcpm-error { color: var(--mcpm-danger); }
+.mcpm-note { color: var(--mcpm-muted); }
+.mcpm-required { color: var(--mcpm-danger); }
 .mcpm-actions { display: flex; gap: 8px; }
-.mcpm-empty { color: var(--dsw-alias-text-secondary, inherit); }
+.mcpm-empty { color: var(--mcpm-muted); margin: 0; }
+.mcpm-navicon { display: block; }
 `;
 
     /** Human age of the snapshot, for the status line. */
@@ -544,6 +684,26 @@ window.__ModuleLoader__.load({
     };
 
     /**
+     * The avatar class for one entry.
+     *
+     * Twelve preset hues, picked by a hash of the name: a wall of identical glyphs gives no
+     * sense of which card is which, and a remote icon URL is untrusted content that must
+     * never be fetched. The hue travels as a class so the markup stays style-free.
+     */
+    function avatarClassOf(name) {
+      const text = String(name || '?');
+      let hash = 0;
+      for (let index = 0; index < text.length; index += 1) hash = (hash * 31 + text.charCodeAt(index)) % 1000003;
+      return 'mcpm-card__icon mcpm-avatar--h' + (hash % 12);
+    }
+
+    /** The single character shown inside the avatar. */
+    function avatarLetterOf(name) {
+      const text = String(name || '?').replace(/^[^0-9A-Za-z\u4e00-\u9fa5]+/, '');
+      return text.slice(0, 1) || '?';
+    }
+
+    /**
      * One catalog card.
      *
      * Five semantic blocks in a fixed order — icon, name, description, badges, actions.
@@ -558,7 +718,7 @@ window.__ModuleLoader__.load({
         onInstall(card);
       };
       return h('article', { className: 'mcpm-card', 'data-state': state },
-        h('div', { className: 'mcpm-card__icon', 'aria-hidden': 'true' }, '📦'),
+        h('div', { className: avatarClassOf(card.name), 'aria-hidden': 'true' }, avatarLetterOf(card.title || card.name)),
         h('h3', { className: 'mcpm-card__name' }, card.title || card.name),
         h('p', { className: 'mcpm-card__desc' }, card.description || '（无描述）'),
         h('div', { className: 'mcpm-card__badges' },
@@ -571,7 +731,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'mcpm-card__actions' },
           h('button', {
             type: 'button',
-            className: state === 'idle' || state === 'needs-config' || state === 'update' ? 'mcpm-btn mcpm-btn--primary' : 'mcpm-btn',
+            className: state === 'idle' || state === 'needs-config' ? 'mcpm-btn mcpm-btn--primary' : 'mcpm-btn',
             'data-state': state,
             disabled: state === 'unavailable',
             title: state === 'unavailable' ? card.unsupportedReason : card.name,
@@ -586,7 +746,7 @@ window.__ModuleLoader__.load({
       const { item, busy, onUninstall } = props;
       const state = item.updateAvailable ? 'update' : 'installed';
       return h('article', { className: 'mcpm-card mcpm-card--installed', 'data-state': state },
-        h('div', { className: 'mcpm-card__icon', 'aria-hidden': 'true' }, '📦'),
+        h('div', { className: avatarClassOf(item.registryName), 'aria-hidden': 'true' }, avatarLetterOf(item.registryTitle || item.registryName)),
         h('h3', { className: 'mcpm-card__name' }, item.registryTitle || item.registryName),
         h('p', { className: 'mcpm-card__desc' },
           item.kind === 'http' ? item.url : [item.command, ...(item.args || [])].join(' ')),
@@ -690,6 +850,29 @@ window.__ModuleLoader__.load({
         runSearch(query, nextKind, nextSort, nextPage);
       };
 
+      /**
+       * Take the user from a card to the row's management view.
+       *
+       * The plugin page publishes `openBundle(pkg)`, which switches the left nav to the
+       * Plugins panel and opens that bundle's page; when the profile does not mount it, a
+       * line of text says where to go instead.
+       */
+      const openInstalled = (hit) => {
+        const pkg = packageOfSlug(hit.installedSlug);
+        const navigation = pluginNavigation();
+        if (navigation !== null && typeof navigation.openBundle === 'function') {
+          try {
+            navigation.openBundle(pkg);
+            setHint('');
+            return;
+          } catch (error) {
+            setHint('打开管理页失败：' + String((error && error.message) || error));
+            return;
+          }
+        }
+        setHint('「' + (hit.title || hit.name) + '」已安装（组合包 ' + pkg + '）。改配置请到左侧「插件」→ dsh-plugin-mcp-manager 的 MCP 行。');
+      };
+
       const uninstall = async (item) => {
         setBusy(item.slug);
         setError('');
@@ -705,11 +888,11 @@ window.__ModuleLoader__.load({
       };
 
       const pageCount = Math.max(1, Math.ceil(results.total / MARKET_PAGE_SIZE));
-      const runtimeLine = status
-        ? ['npx ' + (status.runtimes.npx.available ? '可用' : '缺失'),
-           'uvx ' + (status.runtimes.uvx.available ? '可用' : '缺失'),
-           'docker ' + (status.runtimes.docker.available ? '可用' : '缺失')].join(' · ')
-        : '';
+      // A runtime this machine lacks is the reason an entry reads 不可用, so it is marked
+      // rather than buried in a sentence.
+      const runtimeBits = status
+        ? [['npx', status.runtimes.npx.available], ['uvx', status.runtimes.uvx.available], ['docker', status.runtimes.docker.available]]
+        : [];
 
       return h('div', { className: 'mcpm-page' },
         h('div', { className: 'mcpm-toolbar' },
@@ -745,10 +928,12 @@ window.__ModuleLoader__.load({
             refreshing ? '刷新中…' : '刷新目录'),
         ),
 
-        h('div', { className: 'mcpm-status' },
+        h('div', { className: 'mcpm-statusline' },
           status
-            ? '目录：' + status.count + ' 个服务器 · 更新于 ' + ageText(status.ageMs) + (status.stale ? '（已过期，建议刷新）' : '') + ' · ' + runtimeLine
+            ? '目录：' + status.count + ' 个服务器 · 更新于 ' + ageText(status.ageMs) + (status.stale ? '（已过期，建议刷新）' : '') + ' · '
             : '读取目录状态…',
+          runtimeBits.map(([name, available]) =>
+            h('span', { key: name, 'data-ok': available ? 'yes' : 'no' }, name + (available ? ' 可用' : ' 缺失') + '  ')),
           status && status.source === 'none'
             ? h('div', null, '还没有本地快照，点「刷新目录」拉一次全量（约 100 秒，之后都是本地搜索）。')
             : null,
@@ -773,7 +958,7 @@ window.__ModuleLoader__.load({
 
         installed.items.length > 0
           ? h('section', { className: 'mcpm-section' },
-              h('h2', { className: 'mcpm-section-title' }, '已安装（' + installed.items.length + '）'),
+              h('h2', { className: 'mcpm-result-title' }, '已安装（' + installed.items.length + '）'),
               h('div', { className: 'mcpm-grid' },
                 installed.items.map((item) => h(InstalledCard, { key: item.slug, item, busy, onUninstall: uninstall })),
               ),
@@ -781,7 +966,9 @@ window.__ModuleLoader__.load({
           : null,
 
         h('section', { className: 'mcpm-section' },
-          h('h2', { className: 'mcpm-section-title' }, '搜索结果（' + results.total + '）'),
+          // Auxiliary information, so it stays smaller than the card names it labels.
+          h('h2', { className: 'mcpm-result-title' },
+            (query.trim() === '' ? '全部服务器' : '搜索结果') + '（' + results.total + '）'),
           results.results.length === 0
             ? h('p', { className: 'mcpm-empty' }, '没有匹配的条目。')
             : h('div', { className: 'mcpm-grid' },
@@ -789,7 +976,7 @@ window.__ModuleLoader__.load({
                   key: card.name,
                   card,
                   onInstall: (hit) => { setHint(''); setDialog(hit.name); },
-                  onOpenInstalled: (hit) => setHint('「' + hit.title + '」已安装（组合包 ' + hit.installedSlug + '）。改配置请到左侧「插件」→ dsh-plugin-mcp-manager 的 MCP 行页签。'),
+                  onOpenInstalled: openInstalled,
                   onUninstall: uninstall,
                 })),
               ),
@@ -1119,6 +1306,7 @@ window.__ModuleLoader__.load({
         // carry it — `sidebar.panellist` for the nav entry and `main` for the page body,
         // addressed by the same id. Both are declaration-aware, so registration order
         // against the sidebar does not matter.
+        dock.ctx = ctx;
         ctx.effect(() => installMarketStyles());
         ctx.slots.inject('main', () => ctx.slots.inject('sidebar.panellist', () => {
           const stopMain = ctx.slots.register({ name: 'main', key: MARKET_PANEL_ID }, MarketPage);
