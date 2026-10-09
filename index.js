@@ -755,6 +755,14 @@ function marketDetailResponse(request, ctx) {
       slug: market.slugFor(name),
       serverName: market.serverNameFor(name, takenServerNames(ctx)),
       runtimes,
+      // The install dialog needs these without reaching into `server`: whether this entry
+      // comes from the local file, which registry entry it covers, and whether its command
+      // line was flagged.
+      source: server.source === 'local' ? 'local' : 'registry',
+      coversRegistry: server.coversRegistry === true,
+      coversVersion: server.coversVersion || '',
+      warning: server.warning === true,
+      warningReasons: server.warningReasons || [],
     },
   });
 }
@@ -905,7 +913,9 @@ function marketInstalledResponse(ctx) {
       error: live.error,
       toolCount: live.toolCount,
       latestVersion: entry === null ? null : entry.version,
-      updateAvailable: entry !== null && entry.version !== '' && entry.version !== manifest.registryVersion,
+      // A local entry has no registry counterpart to be newer than, so the comparison is
+    // skipped entirely: no update badge, and no 目录版本 vX（不同） line either.
+    updateAvailable: manifest.source !== 'local' && entry !== null && entry.version !== '' && entry.version !== manifest.registryVersion,
     };
   });
   return json({ ok: true, value: { items, count: items.length, toolListing: toolNames !== null } });

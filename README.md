@@ -145,6 +145,55 @@ ctx.reflect.provide("pluginNavigation", {
 所以本插件用 `ctx.get('pluginNavigation')` 拿它、点已安装卡片时调 `openBundle('@dsh-mcp-market/<slug>')`：
 **切到「插件」面板并打开该组合包页**。取不到时降级成一行文字提示，不碰宿主内部 API。
 
+### 自建条目（local entries）
+
+市场"逛"的是官方注册表，但有些东西**只在这台机器上**：自己写的 MCP 服务、指向内网端点的转发。
+`~/.dsh/mcp-market/local-entries.json` 就是给这些用的——它不伪装成注册表包，直接写清楚怎么装：
+
+```json
+{
+  "cacheVersion": 1,
+  "entries": [
+    {
+      "name": "local.example/demo",
+      "title": "示例服务",
+      "description": "本地示例服务（server.py mcp）",
+      "install": {
+        "kind": "stdio",
+        "command": "C:\\Windows\\py.exe",
+        "args": ["D:\\tools\\demo\\server.py", "mcp"],
+        "env": [
+          { "name": "PYTHONUTF8", "value": "1" },
+          { "name": "DEMO_API_KEY", "description": "示例 API Key", "isRequired": true, "isSecret": true }
+        ]
+      }
+    },
+    { "name": "local.example/hub", "install": { "kind": "http", "url": "http://127.0.0.1:8080/mcp" } }
+  ]
+}
+```
+
+**文件怎么生效**：按 `mtime + 文件大小` 做缓存，**改完存盘、重开市场页就生效，不用重启 DSH**。
+
+**字段规则**
+
+| 字段 | 规则 |
+| --- | --- |
+| `name` | 必填，文件内唯一。与注册表同名时**自建赢**，卡片与确认框都会明示覆盖 |
+| `install.kind` | `stdio` 或 `http`；`sse` 等按二期拒绝 |
+| `command` | 必填且**必须是绝对路径**（`sh`/`cmd`/`python` 这种裸命令名直接拒绝） |
+| `args` | 字符串数组。含 shell 元字符**只警告不拒绝**（合法参数也可能带 `&`），警告会把原文显示在安装确认框里 |
+| `env` / `headers` | `{name, value?, description?, isRequired?, isSecret?}`。有 `value` 就不问、直接写；无 `value` + `isRequired` 表单必填；`isSecret` 打码 |
+| `version` | 可选。自建条目**不参与版本比较**，不会出现「更新 ↑」或「目录版本 vX（不同）」 |
+
+**⚠️ 明文警告**：`value` + `isSecret` 是允许的（例如 `"value": "sk-…"`），但那个值会**以明文写进 profile 的 `cordis.patch.yml`**——
+和注册表条目的密钥现状一样。安装确认框里会明确写出这句话。想让密钥不进 profile，等二期的凭据域。
+
+**校验失败长什么样**：错误带条目序号和字段名，例如 `第 2 条缺 command`、`第 3 条：command 必须是绝对路径（收到 "sh"）`；
+坏条目被跳过，好条目照常加载（不会因为一条写错就整份失效）。
+
+**卸载**：与注册表条目**走完全相同的路径**（`removeBundle` → 删生成目录 → 清 manifest），没有简化分支。
+
 ### 市场是怎么落地的（设计要点）
 
 ```text

@@ -28,6 +28,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
+import * as local from './local.js';
 import { delimiter, join } from 'node:path';
 
 /** The official registry endpoint that serves the catalog. */
@@ -336,16 +337,62 @@ export function catalog() {
       snapshot = null;
     }
   }
-  if (snapshot === null) return { servers: [], fetchedAt: '', count: 0, stale: true, ageMs: null, source: 'none' };
+  if (snapshot === null) {
+    const localOnly = mergeLocal([], null);
+    return {
+      servers: localOnly.servers,
+      fetchedAt: '',
+      count: localOnly.servers.length,
+      stale: true,
+      ageMs: null,
+      source: localOnly.servers.length === 0 ? 'none' : 'empty',
+      local: localOnly.report,
+    };
+  }
   const ageMs = snapshot.fetchedAt === '' ? null : Date.now() - Date.parse(snapshot.fetchedAt);
+  const merged = mergeLocal(snapshot.servers, snapshot);
   return {
-    servers: snapshot.servers,
+    servers: merged.servers,
     fetchedAt: snapshot.fetchedAt,
-    count: snapshot.servers.length,
+    count: merged.servers.length,
     stale: ageMs === null || !Number.isFinite(ageMs) || ageMs > CACHE_TTL_MS,
     ageMs,
-    source: snapshot.servers.length === 0 ? 'empty' : 'cache',
+    source: merged.servers.length === 0 ? 'empty' : 'cache',
+    local: merged.report,
   };
+}
+
+/**
+ * Merge the local file over the registry snapshot.
+ *
+ * Same `name` means the local entry wins — that is what an overlay is for — and the
+ * surviving entry carries `coversRegistry` with the version it replaces, so the install
+ * dialog can name what is being covered. Nothing else about the snapshot changes, and a
+ * local file that fails validation contributes nothing but its errors.
+ *
+ * @param servers - the registry entries.
+ * @param snapshotValue - the snapshot they came from, or `null` when there is none.
+ * @returns `{servers, report}`.
+ */
+function mergeLocal(servers, snapshotValue) {
+  const read = local.readLocalEntries(local.localEntriesPath(CACHE_DIR));
+  const report = {
+    present: read.present,
+    count: read.entries.length,
+    errors: read.errors,
+    warnings: read.warnings,
+    stamp: read.stamp,
+  };
+  if (read.entries.length === 0) return { servers, report };
+
+  const byName = new Map(servers.map((server) => [server.name, server]));
+  for (const entry of read.entries) {
+    const shadowed = byName.get(entry.name);
+    byName.set(entry.name, shadowed === undefined
+      ? entry
+      : { ...entry, coversRegistry: true, coversVersion: shadowed.version || '' });
+  }
+  return { servers: [...byName.values()], report };
 }
 
 /**
@@ -390,6 +437,9 @@ export function searchCatalog(query, options = {}) {
   const { servers } = catalog();
   const needle = String(query || '').trim().toLowerCase();
   const kind = options.kind || 'all';
+  // source is a different axis from kind: kind is the install form (a local process or a
+  // remote endpoint), source is where the entry came from (the registry or the local file).
+  const source = options.source === 'local' ? 'local' : 'all';
   const sort = options.sort || 'relevance';
   const limit = Number.isFinite(options.limit) && options.limit > 0 ? Math.min(Math.floor(options.limit), 200) : 30;
   const offset = Number.isFinite(options.offset) && options.offset > 0 ? Math.floor(options.offset) : 0;
@@ -397,6 +447,7 @@ export function searchCatalog(query, options = {}) {
 
   const scored = [];
   for (const server of servers) {
+    if (source === 'local' && server.source !== 'local') continue;
     const shape = shapeOf(server);
     if (kind === 'local' && !shape.hasLocal) continue;
     if (kind === 'remote' && !shape.hasRemote) continue;
@@ -432,9 +483,12 @@ export function cardStateFor(server, runtimes, installed = new Map()) {
   const { options, blocked } = plansFor(server, runtimes);
   const plan = options[0];
   const manifest = installed.get(server.name) || null;
+  // A variable only needs the form when there is no value to use: a declared `value` in the
+  // local file — or a registry default — is already the answer, secret or not. Without this
+  // an entry whose secrets are all filled in still claimed 需密钥 and still showed a form.
   const needsConfig = plan === undefined
     ? false
-    : (plan.variables || []).some((variable) => variable.isRequired || variable.isSecret)
+    : (plan.variables || []).some((variable) => variable.default === '' && (variable.isRequired || variable.isSecret))
       || (plan.slots || []).some((slot) => slot.isRequired);
   return {
     installable: plan !== undefined,
@@ -444,7 +498,16 @@ export function cardStateFor(server, runtimes, installed = new Map()) {
     needsConfig,
     installedSlug: manifest === null ? '' : manifest.slug,
     installedVersion: manifest === null ? '' : manifest.registryVersion,
-    updateAvailable: manifest !== null && server.version !== '' && server.version !== manifest.registryVersion,
+    // A local entry has no registry version to compare against, so it never claims an
+    // update is available — the version badge and the 更新 state both stay off.
+    updateAvailable: server.source === 'local'
+      ? false
+      : manifest !== null && server.version !== '' && server.version !== manifest.registryVersion,
+    source: server.source === 'local' ? 'local' : 'registry',
+    coversRegistry: server.coversRegistry === true,
+    coversVersion: server.coversVersion || '',
+    warning: server.warning === true,
+    warningReasons: server.warningReasons || [],
   };
 }
 
@@ -471,6 +534,7 @@ function summarize(server) {
     hasLocal: shape.hasLocal,
     hasRemote: shape.hasRemote,
     kinds: server.remotes.map((remote) => remote.type).filter((type, index, all) => all.indexOf(type) === index),
+    source: server.source === 'local' ? 'local' : 'registry',
   };
 }
 
@@ -658,9 +722,68 @@ function argvFor(pack, runtime, prefix) {
  * @param runtimes - the result of {@link detectRuntimes}.
  * @returns `{options, blocked}`: installable plans plus why the rest were skipped.
  */
+/**
+ * The single install plan of a local entry.
+ *
+ * The command line is taken verbatim from the file: this is the one place where the market
+ * turns a hand-written string into a row, which is why `local.js` refuses a relative or bare
+ * `command` and flags inline scripts before anything gets here.
+ *
+ * @param server - a normalized local entry.
+ * @returns `{options, blocked}` in the shape {@link plansFor} returns.
+ */
+function localPlans(server) {
+  const entry = server.local;
+  const warning = server.warning === true ? server.warningReasons.join('；') : '';
+  // A variable with a `value` in the file is already answered, so it goes straight into the
+  // row; the install form only asks for the ones left empty.
+  const fixed = {};
+  for (const variable of entry.env || []) if (variable.default !== '') fixed[variable.name] = variable.default;
+  const fixedHeaders = {};
+  for (const header of entry.headers || []) if (header.default !== '') fixedHeaders[header.name] = header.default;
+
+  if (entry.kind === 'http') {
+    return {
+      options: [{
+        kind: 'http',
+        registryType: 'local',
+        label: `远程连接（自建）· ${entry.url}`,
+        transport: 'streamable-http',
+        url: entry.url,
+        argv: [],
+        slots: [],
+        headers: fixedHeaders,
+        variables: entry.headers || [],
+        risk: '自建条目：请求发往该地址；密钥会作为请求头发送',
+        warning,
+      }],
+      blocked: [],
+    };
+  }
+  return {
+    options: [{
+      kind: 'stdio',
+      registryType: 'local',
+      label: `本地进程（自建）· ${entry.command}`,
+      transport: 'stdio',
+      command: entry.command,
+      argv: (entry.args || []).map((value) => ({ kind: 'literal', value })),
+      slots: [],
+      env: fixed,
+      variables: entry.env || [],
+      risk: '自建条目：在你本机执行这条命令',
+      warning,
+    }],
+    blocked: [],
+  };
+}
+
 export function plansFor(server, runtimes) {
   const options = [];
   const blocked = [];
+  // A local entry carries its own command line, so it skips the package-to-command mapping
+  // entirely: there is no registry package to interpret, only what the file says.
+  if (server.source === 'local' && server.local !== undefined) return localPlans(server);
   for (const pack of server.packages) {
     if (pack.registryType === 'npm') {
       if (!runtimes.npx.available) {
@@ -794,9 +917,11 @@ function yamlString(value) {
 }
 
 /** Render the generated bundle's patch: one `dsh-mcp-client` row. */
-export function renderPatch({ rowId, serverName, plan, args, config }) {
+export function renderPatch({ rowId, serverName, plan, args, config, source }) {
   const lines = [
-    '# Generated by dsh-plugin-mcp-manager from the official MCP registry.',
+    source === 'local'
+      ? '# Generated by dsh-plugin-mcp-manager from a local entry in local-entries.json.'
+      : '# Generated by dsh-plugin-mcp-manager from the official MCP registry.',
     '# Edit the row through the plugin UI; a manual edit here is overwritten on reinstall.',
     '- insert:',
     `    - id: ${rowId}`,
@@ -890,15 +1015,16 @@ export function writeBundle({ slug, server, serverName, plan, args, config, argu
   mkdirSync(dir, { recursive: true });
   const pkg = `${BUNDLE_PREFIX}${slug}`;
   const rowId = `${ROW_PREFIX}${slug}`;
-  writeFileSync(join(dir, 'package.json'), renderPackageJson(slug, server.version, `${server.title} — installed from the official MCP registry`), 'utf8');
-  writeFileSync(join(dir, 'cordis.patch.yml'), renderPatch({ rowId, serverName, plan, args, config }), 'utf8');
+  const origin = server.source === 'local' ? 'a local entry' : 'the official MCP registry';
+  writeFileSync(join(dir, 'package.json'), renderPackageJson(slug, server.version, `${server.title} — installed from ${origin}`), 'utf8');
+  writeFileSync(join(dir, 'cordis.patch.yml'), renderPatch({ rowId, serverName, plan, args, config, source: server.source }), 'utf8');
   const envKeys = Object.keys(config);
   writeFileSync(join(dir, 'market.meta.json'), `${JSON.stringify({
     registryName: server.name,
     registryVersion: server.version,
     registryTitle: server.title,
     installedAt: new Date().toISOString(),
-    source: 'registry',
+    source: server.source === 'local' ? 'local' : 'registry',
     slug,
     pkg,
     rowId,
