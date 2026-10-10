@@ -1,0 +1,46 @@
+# Windows CI, and Windows is the point rather than a convenience.
+#
+# The suites build and read real `.mcpb` archives through %SystemRoot%\System32\tar.exe, and one
+# of the guards exists precisely because a test file once hard-coded its own checkout path
+# (`file:///D:/...`). A Linux runner would exercise neither of those.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # `npm test` hands a glob to `node --test`, and the test runner only accepts glob
+        # arguments from Node 21 on (v20's documentation does not describe them). package.json
+        # still declares "engines": { "node": ">=20" }, which is looser than the suite needs.
+        node-version: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      # There are no dependencies and no lockfile, so there is deliberately no install step:
+      # an `npm ci` here would fail on the missing lockfile and prove nothing.
+
+      - name: Syntax-check every half
+        run: |
+          node --check index.js
+          node --check market.js
+          node --check mcpb.js
+          node --check local.js
+          node --check client.js
+
+      - name: Test
+        run: npm test
