@@ -1148,6 +1148,59 @@ function yamlKey(key) {
   return PLAIN_KEY_PATTERN.test(key) ? key : yamlString(key);
 }
 
+/** The `application` values the plugin manager's declared ChangeResult contract allows. */
+export const APPLICATION_STATES = ['applied', 'restart-required', 'overridden', 'failed', 'cancelled'];
+
+/**
+ * Read what the plugin manager said about one change.
+ *
+ * `change()` catches every operation failure into the result and resolves, so a rejected promise is
+ * not how an install fails — `application: 'failed'` is. Awaiting the promise and reading nothing
+ * else is exactly how a failed install came to answer `{ok: true}`.
+ *
+ * Two values are success, and only two. `overridden` is not an install outcome at all, a value
+ * outside the contract means this build does not know what happened, and anything that is not a
+ * change result proves nothing — none of those may be reported as a success.
+ *
+ * @param result - whatever `installBundle` resolved with.
+ * @returns `{ok: true, application, ...}` or `{ok: false, code, reason, application, ...}`.
+ */
+export function installOutcome(result) {
+  const shape = result === null ? 'null' : Array.isArray(result) ? 'an array' : typeof result;
+  if (result === null || typeof result !== 'object' || Array.isArray(result)) {
+    return {
+      ok: false, code: 'install-result-unverified', application: '', errorCode: '', diagnostic: '', failedAt: '',
+      reason: `the plugin manager resolved with ${shape}, which is not a change result`,
+    };
+  }
+  const error = result.error !== null && typeof result.error === 'object' ? result.error : {};
+  const detail = {
+    application: typeof result.application === 'string' ? result.application : '',
+    errorCode: typeof error.code === 'string' ? error.code : '',
+    diagnostic: typeof error.diagnostic === 'string' ? error.diagnostic : '',
+    failedAt: typeof result.failedAt === 'string' ? result.failedAt : '',
+  };
+  if (detail.application === 'applied' || detail.application === 'restart-required') {
+    return { ok: true, ...detail, reason: '' };
+  }
+  if (detail.application === 'failed') {
+    return { ok: false, code: 'install-failed', ...detail, reason: 'the plugin manager reported the install as failed' };
+  }
+  if (detail.application === 'cancelled') {
+    return { ok: false, code: 'install-cancelled', ...detail, reason: 'the plugin manager reported the install as cancelled' };
+  }
+  if (detail.application === 'overridden') {
+    return { ok: false, code: 'install-overridden', ...detail, reason: 'the plugin manager reported the change as overridden, which is not an install outcome' };
+  }
+  if (detail.application === '') {
+    return { ok: false, code: 'install-result-unverified', ...detail, reason: 'the result carries no application field, so what happened could not be read' };
+  }
+  return {
+    ok: false, code: 'install-result-unknown', ...detail,
+    reason: `"${detail.application}" is not one of the application values this build knows (${APPLICATION_STATES.join(', ')})`,
+  };
+}
+
 /** A YAML double-quoted scalar; JSON string escaping is valid YAML. */
 function yamlString(value) {
   return JSON.stringify(String(value));

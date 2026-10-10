@@ -80,7 +80,7 @@ function makeCtx() {
   const ctx = {
     get(key) {
       if (key === 'connection') return { fetch: { register(spec) { routes.set(spec.path, spec); } } };
-      if (key === 'pluginManager') return { async installBundle(dir) { calls.push(dir); return { exitCode: 0 }; } };
+      if (key === 'pluginManager') return { async installBundle(dir) { calls.push(dir); return { application: 'applied' }; } };
       return undefined;
     },
   };

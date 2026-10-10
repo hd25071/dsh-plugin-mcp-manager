@@ -103,7 +103,9 @@ function makeCtx() {
             const row = { id: written.rowId, serverName: written.serverName, transport: written.transport, env: written.env, headers: written.headers };
             const at = rows.findIndex((candidate) => candidate.id === row.id);
             if (at >= 0) rows[at] = row; else rows.push(row);
-            return { exitCode: 0 };
+            // The shape the real service answers with: `change()` resolves with a ChangeResult
+            // even when the install failed, so the double has to carry `application` too.
+            return { application: 'applied' };
           },
         };
       }

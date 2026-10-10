@@ -651,6 +651,102 @@ function identityFor(ctx, name) {
   };
 }
 
+/**
+ * What can be said about the profile once the installer has answered.
+ *
+ * Deliberately small, and deliberately two questions: is this bundle a dependency of the profile
+ * (`pluginManager.listBundles()`, the official reader), and is the row live in the running
+ * configuration (`configEditor.configuration()`). It does **not** compare the effective
+ * configuration, the render digest or the surrounding rows; that is P2-3B.
+ *
+ * `persisted` is not a weaker word for `live` — it is the honest state after a
+ * `restart-required` outcome, where the profile has the change and the running process does not.
+ *
+ * @param ctx - the plugin context.
+ * @param manager - the plugin manager service.
+ * @param pkg - the bundle package name this install wrote.
+ * @param rowId - the row it inserted.
+ * @param serverName - the name that row loads under.
+ * @returns `{state, verified, reason}` with `state` one of `live|persisted|not-applied|unavailable`.
+ */
+function postInstallVerification(ctx, manager, pkg, rowId, serverName) {
+  const rows = profileMcpRows(ctx);
+  let bundles = null;
+  try {
+    if (manager !== undefined && typeof manager.listBundles === 'function') {
+      const listed = manager.listBundles();
+      if (Array.isArray(listed)) bundles = listed;
+    }
+  } catch {
+    bundles = null;
+  }
+  if (rows === null || bundles === null) {
+    const missing = [];
+    if (rows === null) missing.push('the configEditor service cannot list rows');
+    if (bundles === null) missing.push('the pluginManager cannot list bundles');
+    return {
+      state: 'unavailable', verified: false,
+      reason: `${missing.join(' and ')}, so the install could not be checked against the profile`,
+    };
+  }
+  const bundle = bundles.find((item) => item !== null && typeof item === 'object' && item.name === pkg) || null;
+  if (bundle === null || bundle.installed !== true) {
+    return {
+      state: 'not-applied', verified: false,
+      reason: `the plugin manager reported success but the profile has no installed dependency "${pkg}"`,
+    };
+  }
+  const live = rows.some((row) => row.id === rowId && row.serverName === serverName);
+  if (live) return { state: 'live', verified: true, reason: '' };
+  return {
+    state: 'persisted', verified: false,
+    reason: `"${pkg}" is installed in the profile, but row ${rowId} is not in the running configuration yet`,
+  };
+}
+
+/** The sentence a refused install answers with: the installer's own words first. */
+function installRefusalMessage(outcome) {
+  const parts = [];
+  if (outcome.errorCode !== '') parts.push(outcome.errorCode);
+  if (outcome.diagnostic !== '') parts.push(outcome.diagnostic);
+  if (outcome.failedAt !== '') parts.push('failed at ' + outcome.failedAt);
+  if (outcome.reason !== '') parts.push(outcome.reason);
+  return parts.length > 0 ? parts.join(' — ') : 'the install did not take effect';
+}
+
+/**
+ * The answer a refused install gives: what failed, and what is now sitting on disk.
+ *
+ * P2-3A **identifies** the residue; it does not clean it up. Removing a bundle without proof that
+ * nothing else depends on it — and that the profile change can be undone — is the failure mode
+ * P2-3B exists to design, so no refusal path touches the filesystem or the profile.
+ */
+function installRefused(code, message, status, { written, identity, result, verification }) {
+  return json({
+    ok: false,
+    error: { code, message },
+    value: {
+      slug: written.slug,
+      pkg: written.pkg,
+      dir: written.dir,
+      rowId: identity.rowId,
+      serverName: identity.serverName,
+      identity: identityValue(identity),
+      ...(verification === undefined ? {} : { verification }),
+      install: result === null || result === undefined ? null : result,
+      leftover: {
+        bundle: written.dir,
+        files: ['package.json', 'cordis.patch.yml', 'market.meta.json'],
+        from: identity.mode,
+        orphaned: true,
+        note: identity.mode === 'update'
+          ? 'the row still points at this directory, but with the newly written content: a failed update replaces it in place'
+          : 'no successful install backs this directory, and the market will keep listing it as installed until it is removed deliberately',
+      },
+    },
+  }, status);
+}
+
 /** The identity block both the preview and the install answer with. */
 function identityValue(identity) {
   return {
@@ -1033,27 +1129,42 @@ async function marketInstallResponse(request, ctx) {
   } catch (error) {
     return failure('write-failed', String((error && error.message) || error), 500);
   }
+  // The installer answers with a ChangeResult, and it RESOLVES even when the install failed —
+  // `change()` folds every operation error into that result. So the promise settling is not the
+  // news; `application` is, and it is read before anything is reported.
+  let result;
   try {
-    const result = await manager.installBundle(written.dir, { activateNewBundles: true });
-    return json({
-      ok: true,
-      value: {
-        slug,
-        pkg: written.pkg,
-        dir: written.dir,
-        rowId: identity.rowId,
-        serverName,
-        // "reinstalled" means the profile really has this row. It used to mean only that files for
-        // this slug were on disk, which an install that never took effect also leaves behind.
-        reinstalled: identity.mode === 'update',
-        keptConfigKeys: Object.keys(previous),
-        identity: identityValue(identity),
-        install: result === undefined ? null : result,
-      },
-    });
+    result = await manager.installBundle(written.dir, { activateNewBundles: true });
   } catch (error) {
-    return failure('install-failed', String((error && error.message) || error), 500);
+    return installRefused('install-failed', String((error && error.message) || error), 502, { written, identity, result: null });
   }
+  const outcome = market.installOutcome(result);
+  if (outcome.ok !== true) {
+    return installRefused(outcome.code, installRefusalMessage(outcome), 502, { written, identity, result });
+  }
+  const verification = postInstallVerification(ctx, manager, written.pkg, identity.rowId, serverName);
+  if (verification.state === 'not-applied') {
+    return installRefused('install-not-applied', verification.reason, 500, { written, identity, result, verification });
+  }
+  return json({
+    ok: true,
+    value: {
+      slug,
+      pkg: written.pkg,
+      dir: written.dir,
+      rowId: identity.rowId,
+      serverName,
+      // "reinstalled" means the profile really has this row. It used to mean only that files for
+      // this slug were on disk, which an install that never took effect also leaves behind.
+      reinstalled: identity.mode === 'update',
+      keptConfigKeys: Object.keys(previous),
+      identity: identityValue(identity),
+      // How far this request actually got: `live`, `persisted` (the profile has it, the running
+      // process does not — the honest reading of `restart-required`), or `unavailable`.
+      verification,
+      install: result === undefined ? null : result,
+    },
+  });
 }
 
 /**

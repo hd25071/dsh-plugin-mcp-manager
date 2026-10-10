@@ -73,7 +73,7 @@ function makeCtx() {
       if (key === 'connection') return { fetch: { register(spec) { routes.set(spec.path, spec); } } };
       if (key === 'pluginManager') {
         return {
-          async installBundle(spec, options) { calls.install.push({ spec, options }); return { exitCode: 0 }; },
+          async installBundle(spec, options) { calls.install.push({ spec, options }); return { application: 'applied' }; },
           async removeBundle(name) { calls.remove.push(name); return { exitCode: 0 }; },
         };
       }
@@ -203,7 +203,7 @@ test('a reinstall keeps the configuration the row already carries', async () => 
     get(key) {
       if (key === 'connection') return { fetch: { register(spec) { routes.set(spec.path, spec); } } };
       if (key === 'pluginManager') {
-        return { async installBundle() { return { exitCode: 0 }; }, async removeBundle() { return { exitCode: 0 }; } };
+        return { async installBundle() { return { application: 'applied' }; }, async removeBundle() { return { exitCode: 0 }; } };
       }
       if (key === 'configEditor') {
         return {
@@ -359,7 +359,7 @@ test('the installed list counts the tools the MCP client registered', async () =
     get(key) {
       if (key === 'connection') return { fetch: { register(spec) { routes.set(spec.path, spec); } } };
       if (key === 'pluginManager') {
-        return { async installBundle() { return { exitCode: 0 }; }, async removeBundle() { return { exitCode: 0 }; } };
+        return { async installBundle() { return { application: 'applied' }; }, async removeBundle() { return { exitCode: 0 }; } };
       }
       if (key === 'tools') {
         // The documented enumeration on the tools service is `schemas()`; nothing else
@@ -394,7 +394,7 @@ test('an enumeration that is unavailable reports an unknown count rather than ze
     get(key) {
       if (key === 'connection') return { fetch: { register(spec) { routes.set(spec.path, spec); } } };
       if (key === 'pluginManager') {
-        return { async installBundle() { return { exitCode: 0 }; }, async removeBundle() { return { exitCode: 0 }; } };
+        return { async installBundle() { return { application: 'applied' }; }, async removeBundle() { return { exitCode: 0 }; } };
       }
       return undefined; // no tools service mounted at all
     },

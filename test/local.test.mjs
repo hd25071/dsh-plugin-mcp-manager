@@ -156,7 +156,7 @@ test('installing a local entry over an installed registry version replaces it', 
       if (key === 'connection') return { fetch: { register(spec) { routes.set(spec.path, spec); } } };
       if (key === 'pluginManager') {
         return {
-          async installBundle(spec, options) { calls.install.push({ spec, options }); return { exitCode: 0 }; },
+          async installBundle(spec, options) { calls.install.push({ spec, options }); return { application: 'applied' }; },
           async removeBundle(name) { calls.remove.push(name); return { exitCode: 0 }; },
         };
       }
@@ -334,7 +334,7 @@ test('an entry whose values are all declared installs without a form', async () 
   const ctx = {
     get(key) {
       if (key === 'connection') return { fetch: { register(spec) { routes.set(spec.path, spec); } } };
-      if (key === 'pluginManager') return { async installBundle() { return { exitCode: 0 }; } };
+      if (key === 'pluginManager') return { async installBundle() { return { application: 'applied' }; } };
       return undefined;
     },
   };

@@ -70,7 +70,7 @@ function makeCtx() {
     get(key) {
       if (key === 'connection') return { fetch: { register(spec) { routes.set(spec.path, spec); } } };
       if (key === 'pluginManager') {
-        return { async installBundle(dir, options) { calls.install.push({ dir, options }); return { exitCode: 0 }; } };
+        return { async installBundle(dir, options) { calls.install.push({ dir, options }); return { application: 'applied' }; } };
       }
       return undefined;
     },
