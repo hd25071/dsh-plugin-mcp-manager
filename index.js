@@ -287,8 +287,11 @@ async function configResponse(request, ctx) {
   if (!reset && config === null) return failure('bad-request', 'config object or reset:true is required', 400);
 
   const entries = typeof editor.entries === 'function' ? editor.entries() : [];
-  const entry = (Array.isArray(entries) ? entries : []).find((candidate) => idOfEntry(candidate) === id);
-  if (entry === undefined) return failure('entry-not-found', 'no addressable entry with id ' + id, 404);
+  // The id is chosen by the caller and this plugin manages MCP rows only. The lookup is by id
+  // alone, so without the module check the same request would rewrite any other plugin's
+  // configuration — every other entry lookup in this file narrows on the module for that reason.
+  const entry = (Array.isArray(entries) ? entries : []).find((candidate) => idOfEntry(candidate) === id && moduleOfEntry(candidate) === MCP_MODULE);
+  if (entry === undefined) return failure('entry-not-found', 'no MCP row with id ' + id, 404);
 
   try {
     const applied = await editor.edit(entry, (current, inherited) =>
