@@ -72,3 +72,27 @@ test('every module the runtime imports is listed in the package manifest', () =>
   }
   assert.deepEqual(missing, [], 'a shipped module imports a file the manifest does not ship');
 });
+
+// And once more, one level out: a suite that only loads on the machine it was written on. Six
+// dynamic imports carried the author's absolute checkout path (`file:///D:/dshtools/...`), so
+// every one of those files failed at module load on any other checkout — CI first of all. A
+// specifier that names one machine cannot be resolved on another, so the rule is simply that an
+// import must never spell one out.
+test('no module is imported through a machine-specific absolute path', () => {
+  const offenders = [];
+  for (const file of sourceFiles(root)) {
+    const source = readFileSync(file, 'utf8');
+    for (const match of source.matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*)['"]([^'"]+)['"]/g)) {
+      const specifier = match[1];
+      const machineSpecific =
+        specifier.startsWith('file:///') ||
+        /^[A-Za-z]:[\\/]/.test(specifier) ||
+        specifier.startsWith('\\\\') ||
+        /^\/(?:Users|home|tmp|var|opt)\//.test(specifier);
+      if (!machineSpecific) continue;
+      const line = source.slice(0, match.index).split(/\r?\n/).length;
+      offenders.push(`${file.slice(root.length)}:${line}: ${specifier}`);
+    }
+  }
+  assert.deepEqual(offenders, [], 'a path that names one machine cannot be resolved on any other');
+});

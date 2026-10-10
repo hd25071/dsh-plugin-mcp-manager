@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const mcpb = await import('file:///D:/dshtools/dsh-plugin-mcp-manager/mcpb.js');
+const mcpb = await import('../mcpb.js');
 
 const work = mkdtempSync(join(tmpdir(), 'mcpb-test-'));
 const tar = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');

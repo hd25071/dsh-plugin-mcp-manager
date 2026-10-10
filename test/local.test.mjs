@@ -12,9 +12,9 @@ const home = mkdtempSync(join(tmpdir(), 'mcpm-local-test-'));
 process.env.USERPROFILE = home;
 process.env.HOME = home;
 
-const market = await import('file:///D:/dshtools/dsh-plugin-mcp-manager/market.js');
-const local = await import('file:///D:/dshtools/dsh-plugin-mcp-manager/local.js');
-const host = await import('file:///D:/dshtools/dsh-plugin-mcp-manager/index.js');
+const market = await import('../market.js');
+const local = await import('../local.js');
+const host = await import('../index.js');
 
 const LOCAL_PATH = local.localEntriesPath(market.CACHE_DIR);
 

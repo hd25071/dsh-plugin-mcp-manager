@@ -17,8 +17,8 @@ const home = mkdtempSync(join(tmpdir(), 'mcpm-mcpb-routes-'));
 process.env.USERPROFILE = home;
 process.env.HOME = home;
 
-const market = await import('file:///D:/dshtools/dsh-plugin-mcp-manager/market.js');
-const host = await import('file:///D:/dshtools/dsh-plugin-mcp-manager/index.js');
+const market = await import('../market.js');
+const host = await import('../index.js');
 
 const work = mkdtempSync(join(tmpdir(), 'mcpm-mcpb-zips-'));
 const tar = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
