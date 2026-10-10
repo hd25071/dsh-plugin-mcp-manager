@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-mcp-manager",
-  "version": "0.3.0",
+  "version": "0.5.2",
   "description": "MCP server manager and marketplace for DeepSeek Harness: browse the official MCP registry, install a server as a profile row with one click, then read, edit, enable or disable every MCP row from the Plugins page.",
   "type": "module",
   "license": "MIT",
