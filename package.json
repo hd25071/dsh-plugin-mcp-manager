@@ -59,5 +59,8 @@
         "@deepseek-ai/dsh-client-ui-plugin-manager"
       ]
     }
+  },
+  "devDependencies": {
+    "js-yaml": "^4.3.2"
   }
 }

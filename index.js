@@ -1020,6 +1020,13 @@ async function marketInstallResponse(request, ctx) {
     }
   }
 
+  // The row's env / headers names are the two places a third-party entry gets to write YAML
+  // *structure* rather than a value. They are checked here, before this install owns any file, so
+  // a bad name cannot leave half a bundle behind — and it is refused, never quietly dropped.
+  const keyBlock = market.configBlockFor(plan, config);
+  const keyCheck = market.checkBlockKeys(keyBlock.kind, keyBlock.values);
+  if (keyCheck.ok !== true) return failure(keyCheck.code, keyCheck.reason, 400);
+
   let written;
   try {
     written = market.writeBundle({ slug, rowId: identity.rowId, server, serverName, plan, args: installArgs, config, argumentValues, mcpbInfo });

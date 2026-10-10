@@ -69,6 +69,14 @@ export const BUNDLE_SCOPE = '@dsh-mcp-market';
 export const ROW_PREFIX = 'mcp-';
 /** The `serverName` shape `dsh-mcp-client` accepts; a name outside it never loads. */
 export const SERVER_NAME_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
+/** A portable environment-variable name: letters, digits and underscores, not starting with a digit. */
+const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** RFC 9110 field-name is a token, so `-`, `.` and `!#$%&'*+^_`|~` are legal and must not be refused. */
+const HEADER_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+/** Longest key either block may carry; well past anything a real server declares. */
+const MAX_KEY_LENGTH = 128;
+/** A key safe to write bare in YAML: letters, digits, `_`, `-` and `.`, not starting with a digit or dash. */
+const PLAIN_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
 /** The registry's per-version metadata block. */
 const OFFICIAL_META = 'io.modelcontextprotocol.registry/official';
 const PAGE_LIMIT = 100;
@@ -1029,6 +1037,117 @@ export function resolveIdentity({ name, slug, taken = [], current = null }) {
   return { ok: true, mode: 'update', rowId, serverName };
 }
 
+/** The rules one `env` or `headers` block's key names have to satisfy, and why. */
+const KEY_RULES = {
+  env: {
+    pattern: ENV_NAME_PATTERN,
+    shape: 'a portable environment-variable name (letters, digits and underscores, not starting with a digit)',
+    // Windows environment blocks are matched case-insensitively, so two names that differ only in
+    // case are one variable there.
+    caseInsensitive: true,
+  },
+  headers: {
+    pattern: HEADER_NAME_PATTERN,
+    shape: 'an HTTP field-name token (RFC 9110)',
+    // Header names have always been case-insensitive; `Authorization` and `authorization` are one.
+    caseInsensitive: true,
+  },
+};
+
+/**
+ * The `env` (stdio) or `headers` (http) block one row will be written with, and what that block is
+ * called.
+ *
+ * `renderPatch` and the pre-write check both read this, so the keys that are checked are the keys
+ * that are written — the merge that decides them exists once, in one place.
+ *
+ * @param plan - the install plan.
+ * @param config - the values collected for this install.
+ * @returns `{kind, values, keys}`.
+ */
+export function configBlockFor(plan, config = {}) {
+  if (plan.transport === 'stdio') {
+    // An mcpb package's env is already derived from its manifest, and the values the form collected
+    // are that package's own `user_config` inputs — a different namespace. Merging them here would
+    // write every input a second time under its raw key name.
+    const values = plan.registryType === 'mcpb' ? { ...plan.env } : { ...plan.env, ...(config || {}) };
+    return { kind: 'env', values, keys: Object.keys(values) };
+  }
+  const values = { ...plan.headers, ...(config || {}) };
+  return { kind: 'headers', values, keys: Object.keys(values) };
+}
+
+/** A key rendered safe to quote back in a message: control characters shown as escapes, not as themselves. */
+function printableKey(key) {
+  return String(key)
+    .replace(/[\u0000-\u001f\u007f]/g, (character) => '\\u' + character.charCodeAt(0).toString(16).padStart(4, '0'))
+    .slice(0, 80);
+}
+
+/**
+ * Check the key names of one `env` / `headers` block before anything is written.
+ *
+ * A *value* goes through JSON escaping, which is also valid YAML, so a value can never change the
+ * shape of the document. A *key* is the left-hand side of the mapping: a newline in one adds an
+ * entry that was never declared, a colon or a leading dash moves one, an empty one is not a key at
+ * all, and a null byte makes the whole file unparseable. These keys come from third-party data —
+ * the registry's declared variables and headers, a local entry file, an mcpb package's manifest —
+ * so the shape of the profile's configuration must not be theirs to decide.
+ *
+ * Nothing is dropped. A single bad key refuses the whole write, so what is stored is never a
+ * quietly edited version of what was asked for.
+ *
+ * @param kind - `'env'` or `'headers'`.
+ * @param values - the block that is about to be written.
+ * @returns `{ok: true}` or `{ok: false, code, reason}`.
+ */
+export function checkBlockKeys(kind, values) {
+  const rule = KEY_RULES[kind];
+  if (rule === undefined) {
+    return { ok: false, code: 'invalid-config-key', reason: `unknown key block "${kind}"` };
+  }
+  if (values === null || typeof values !== 'object' || Array.isArray(values)) {
+    const received = values === null ? 'null' : Array.isArray(values) ? 'an array' : typeof values;
+    return { ok: false, code: 'invalid-config-key', reason: `the ${kind} block must be an object, received ${received}` };
+  }
+  const seen = new Map();
+  for (const key of Object.keys(values)) {
+    if (typeof key !== 'string' || key === '') {
+      return { ok: false, code: 'invalid-config-key', reason: `the ${kind} block carries an empty key, which is not a mapping key at all` };
+    }
+    if (key.length > MAX_KEY_LENGTH) {
+      return { ok: false, code: 'invalid-config-key', reason: `${kind} name is ${key.length} characters long, over the ${MAX_KEY_LENGTH} limit` };
+    }
+    if (!rule.pattern.test(key)) {
+      return { ok: false, code: 'invalid-config-key', reason: `"${printableKey(key)}" is not ${rule.shape}, so it cannot be written as a ${kind} key` };
+    }
+    const folded = key.toLowerCase();
+    if (rule.caseInsensitive && seen.has(folded)) {
+      return { ok: false, code: 'invalid-config-key', reason: `${kind} keys "${printableKey(seen.get(folded))}" and "${printableKey(key)}" are the same name, because ${kind === 'headers' ? 'header names' : 'environment names on Windows'} are matched case-insensitively` };
+    }
+    seen.set(folded, key);
+  }
+  return { ok: true };
+}
+
+/** The error a refused key raises, so a caller that skipped the check still cannot write one. */
+function keyRefusal(check) {
+  const error = new Error(`invalid-config-key: ${check.reason}`);
+  error.code = 'invalid-config-key';
+  return error;
+}
+
+/**
+ * A YAML mapping key.
+ *
+ * A name that is checked and plain-safe is written bare, which is what every patch written so far
+ * looks like and is why this does not churn the generated files. Anything else is quoted — JSON
+ * string escaping is valid YAML — so a key is never emitted as structure, whatever reaches here.
+ */
+function yamlKey(key) {
+  return PLAIN_KEY_PATTERN.test(key) ? key : yamlString(key);
+}
+
 /** A YAML double-quoted scalar; JSON string escaping is valid YAML. */
 function yamlString(value) {
   return JSON.stringify(String(value));
@@ -1048,26 +1167,26 @@ export function renderPatch({ rowId, serverName, plan, args, config, source }) {
     `        serverName: ${yamlString(serverName)}`,
     `        transport: ${yamlString(plan.transport)}`,
   ];
+  // The keys are YAML structure, so they are decided in one place, checked, and only then written.
+  // A bad one refuses the whole render instead of being skipped: a configuration that quietly drops
+  // a field is harder to notice than an install that refuses to happen.
+  const block = configBlockFor(plan, config);
+  const keyCheck = checkBlockKeys(block.kind, block.values);
+  if (keyCheck.ok !== true) throw keyRefusal(keyCheck);
+
   if (plan.transport === 'stdio') {
     lines.push(`        command: ${yamlString(plan.command)}`);
     lines.push('        args:');
     for (const argument of args || []) lines.push(`          - ${yamlString(argument)}`);
     if ((args || []).length === 0) lines.push('          []');
-    // An mcpb package's env is already derived from its manifest, and the values the form
-    // collected are that package's own `user_config` inputs — a different namespace. Merging
-    // them here would write every input a second time under its raw key name.
-    const env = plan.registryType === 'mcpb' ? { ...plan.env } : { ...plan.env, ...config };
-    const keys = Object.keys(env);
     lines.push('        env:');
-    if (keys.length === 0) lines.push('          {}');
-    for (const key of keys) lines.push(`          ${key}: ${yamlString(env[key])}`);
+    if (block.keys.length === 0) lines.push('          {}');
+    for (const key of block.keys) lines.push(`          ${yamlKey(key)}: ${yamlString(block.values[key])}`);
   } else {
     lines.push(`        url: ${yamlString(plan.url)}`);
-    const headers = { ...plan.headers, ...config };
-    const keys = Object.keys(headers);
     lines.push('        headers:');
-    if (keys.length === 0) lines.push('          {}');
-    for (const key of keys) lines.push(`          ${key}: ${yamlString(headers[key])}`);
+    if (block.keys.length === 0) lines.push('          {}');
+    for (const key of block.keys) lines.push(`          ${yamlKey(key)}: ${yamlString(block.values[key])}`);
   }
   lines.push('        toolCallTimeoutMs: 60000');
   lines.push('        failOnStartupError: false');

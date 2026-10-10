@@ -30,9 +30,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+          cache: npm
 
-      # There are no dependencies and no lockfile, so there is deliberately no install step:
-      # an `npm ci` here would fail on the missing lockfile and prove nothing.
+      # The suite reads the YAML it generates back with a real parser, so that parser is a
+      # devDependency and has to be installed. Nothing shipped imports it — `dependencies` is still
+      # empty — so a profile that installs this plugin pulls in nothing new.
+      - name: Install the test dependency
+        run: npm ci
 
       - name: Syntax-check every half
         run: |
