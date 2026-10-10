@@ -536,29 +536,131 @@ async function callsResponse(request, ctx) {
 const FIBER_STATES = { 0: 'pending', 1: 'loading', 2: 'active', 3: 'failed' };
 
 /**
- * Every `serverName` already loaded in this profile.
+ * The MCP rows this profile actually has loaded.
  *
- * `dsh-mcp-client` throws when two instances claim one `serverName`, so a generated row
- * must be named around the existing ones rather than colliding with them.
+ * `null` means the profile could not be read, which is not the same answer as "no rows": an
+ * unreadable profile cannot prove a name is free, so the caller is told the identity is unverified
+ * instead of being handed an empty list that looks like a clean slate.
  *
  * @param ctx - the plugin context.
- * @returns the taken names, or an empty list when the editor is absent.
+ * @returns `[{id, serverName}]`, or `null` when `configEditor` cannot list rows.
  */
-function takenServerNames(ctx) {
+function profileMcpRows(ctx) {
   const editor = serviceOf(ctx, 'configEditor');
-  const names = [];
+  if (editor === undefined || typeof editor.configuration !== 'function') return null;
+  const rows = [];
   try {
-    if (editor === undefined || typeof editor.configuration !== 'function') return names;
     for (const item of editor.configuration() || []) {
       const entry = item && item.entry;
       if (moduleOfEntry(entry) !== MCP_MODULE) continue;
       const effective = { ...((item && item.inherited) || {}), ...((item && item.override) || {}) };
-      if (typeof effective.serverName === 'string' && effective.serverName !== '') names.push(effective.serverName);
+      rows.push({
+        id: idOfEntry(entry),
+        serverName: typeof effective.serverName === 'string' ? effective.serverName : '',
+      });
     }
   } catch {
-    /* a missing editor costs collision avoidance, never the route */
+    /* a failing read proves as little as no read; the caller reports it as unverified */
+    return null;
+  }
+  return rows;
+}
+
+/**
+ * The names the rows other than `ownRowId` already hold.
+ *
+ * The exclusion is by row identity and never by name. Dropping every entry that happens to spell
+ * the same name would also hide the day a genuinely different row holds it — which is the case
+ * that has to be reported rather than named around.
+ *
+ * @param rows - the profile rows, or `null` when unreadable.
+ * @param ownRowId - the row being installed, excluded from the collision check.
+ * @returns the taken names.
+ */
+function takenServerNames(rows, ownRowId) {
+  const names = [];
+  for (const row of rows || []) {
+    if (row.id === ownRowId) continue;
+    if (row.serverName !== '') names.push(row.serverName);
   }
   return names;
+}
+
+/**
+ * Resolve one catalog entry's row identity from both the disk and the profile.
+ *
+ * The install dialog and the install route both call this, so what the dialog promises is what the
+ * write performs. The two sources are compared rather than assumed to agree:
+ *
+ * - the generated bundle on disk, which records what a past install *wrote*;
+ * - the live profile rows, which show what DSH has actually *loaded*.
+ *
+ * A bundle with no matching row is reported as such. Treating the manifest's existence as proof of
+ * installation is precisely how a half-finished install comes to look like a healthy one.
+ *
+ * @param ctx - the plugin context.
+ * @param name - the registry entry name.
+ * @returns `{slug, rowId, serverName, mode, state, conflict, detail, manifest}`.
+ */
+function identityFor(ctx, name) {
+  const slug = market.slugFor(name);
+  const manifest = market.manifestFor(slug);
+  const rows = profileMcpRows(ctx);
+  const expectedRowId = market.rowIdForSlug(slug);
+  const recordedRowId = manifest !== null && typeof manifest.rowId === 'string' && manifest.rowId !== '' ? manifest.rowId : '';
+  const recordedName = manifest !== null && typeof manifest.serverName === 'string' ? manifest.serverName.trim() : '';
+  const rowId = recordedRowId === '' ? expectedRowId : recordedRowId;
+  const own = rows === null ? null : rows.find((row) => row.id === rowId) || null;
+
+  let state = 'fresh';
+  if (rows === null) state = manifest === null ? 'fresh' : 'profile-unreadable';
+  else if (own !== null) state = 'update';
+  else if (manifest !== null) state = 'manifest-without-row';
+
+  // The loaded row is the authority on its own name; the manifest is only a fallback for a profile
+  // that cannot be read, and only when it records a name the client would accept.
+  const current = state === 'update'
+    ? { rowId, serverName: own.serverName }
+    : state === 'profile-unreadable' && market.SERVER_NAME_PATTERN.test(recordedName)
+      ? { rowId, serverName: recordedName }
+      : null;
+
+  const resolved = market.resolveIdentity({ name, slug, taken: takenServerNames(rows, rowId), current });
+  const notes = [];
+  if (state === 'manifest-without-row') {
+    notes.push(`a bundle for "${name}" is on disk but no MCP row ${rowId} is loaded in this profile, so it is not installed`);
+  }
+  if (state === 'profile-unreadable') {
+    notes.push('the configEditor service cannot list rows, so the bundle on disk could not be compared with the profile');
+  }
+  if (recordedRowId !== '' && recordedRowId !== expectedRowId) {
+    notes.push(`the bundle records row id ${recordedRowId} where ${expectedRowId} was expected`);
+  }
+  if (state === 'update' && recordedName !== '' && recordedName !== own.serverName) {
+    notes.push(`the loaded row is named "${own.serverName}" while the bundle records "${recordedName}"; the loaded row wins`);
+  }
+  return {
+    slug,
+    rowId: resolved.rowId,
+    serverName: resolved.serverName,
+    mode: resolved.mode,
+    state,
+    conflict: resolved.ok === true ? '' : resolved.reason,
+    detail: notes.join('; '),
+    manifest,
+  };
+}
+
+/** The identity block both the preview and the install answer with. */
+function identityValue(identity) {
+  return {
+    rowId: identity.rowId,
+    serverName: identity.serverName,
+    mode: identity.mode,
+    state: identity.state,
+    conflict: identity.conflict,
+    detail: identity.detail,
+  };
 }
 
 /**
@@ -768,6 +870,9 @@ function marketDetailResponse(request, ctx) {
   if (server === null) return failure('not-found', `the catalog has no server named "${name}"`, 404);
   const runtimes = market.detectRuntimes();
   const { options, blocked } = market.plansFor(server, runtimes);
+  // The same resolver the install route uses, so the name the dialog shows is the name that is
+  // written. It is also where a conflict becomes visible before anything is clicked.
+  const identity = identityFor(ctx, name);
   return json({
     ok: true,
     value: {
@@ -775,8 +880,9 @@ function marketDetailResponse(request, ctx) {
       options,
       blocked,
       installed: market.listInstalled().find((item) => item.registryName === name) || null,
-      slug: market.slugFor(name),
-      serverName: market.serverNameFor(name, takenServerNames(ctx)),
+      slug: identity.slug,
+      serverName: identity.serverName,
+      identity: identityValue(identity),
       runtimes,
       // The install dialog needs these without reaching into `server`: whether this entry
       // comes from the local file, which registry entry it covers, and whether its command
@@ -824,11 +930,16 @@ async function marketInstallResponse(request, ctx) {
     return failure('no-install-option', 'this machine has no runtime for any package this server publishes', 409);
   }
 
+  // One identity decision, shared with the preview route. A conflict is refused here rather than
+  // named around: the name is what every `mcp__<serverName>__*` reference already points at.
+  const identity = identityFor(ctx, name);
+  if (identity.conflict !== '') return failure('identity-conflict', identity.conflict, 409);
+
   // A reinstall keeps whatever the row already carries: the user's secrets are in the
   // profile, not in this request, and regenerating the patch from scratch would drop them.
-  const slug = market.slugFor(name);
-  const existing = market.manifestFor(slug);
-  const previous = existing === null ? {} : currentRowConfig(ctx, existing.rowId);
+  const slug = identity.slug;
+  const existing = identity.manifest;
+  const previous = existing === null ? {} : currentRowConfig(ctx, identity.rowId);
 
   // Only declared variables are written, and only when they carry a value.
   const allowed = new Set(plan.variables.map((variable) => variable.name));
@@ -856,7 +967,7 @@ async function marketInstallResponse(request, ctx) {
     return failure('missing-arguments', `required arguments are empty: ${missingArguments.join(', ')}`, 400);
   }
 
-  const serverName = market.serverNameFor(name, takenServerNames(ctx));
+  const serverName = identity.serverName;
   // What the bundle is written with. An mcpb plan replaces it below, once its manifest has
   // been read — `args` itself is a const, which an earlier attempt here learned the hard way.
   let installArgs = args;
@@ -911,7 +1022,7 @@ async function marketInstallResponse(request, ctx) {
 
   let written;
   try {
-    written = market.writeBundle({ slug, server, serverName, plan, args: installArgs, config, argumentValues, mcpbInfo });
+    written = market.writeBundle({ slug, rowId: identity.rowId, server, serverName, plan, args: installArgs, config, argumentValues, mcpbInfo });
   } catch (error) {
     return failure('write-failed', String((error && error.message) || error), 500);
   }
@@ -923,9 +1034,13 @@ async function marketInstallResponse(request, ctx) {
         slug,
         pkg: written.pkg,
         dir: written.dir,
+        rowId: identity.rowId,
         serverName,
-        reinstalled: existing !== null,
+        // "reinstalled" means the profile really has this row. It used to mean only that files for
+        // this slug were on disk, which an install that never took effect also leaves behind.
+        reinstalled: identity.mode === 'update',
         keptConfigKeys: Object.keys(previous),
+        identity: identityValue(identity),
         install: result === undefined ? null : result,
       },
     });

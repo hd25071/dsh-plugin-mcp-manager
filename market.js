@@ -67,6 +67,8 @@ ode_modules layout. */
 export const BUNDLE_SCOPE = '@dsh-mcp-market';
 /** Row-id prefix of a generated row, kept distinct from hand-written rows. */
 export const ROW_PREFIX = 'mcp-';
+/** The `serverName` shape `dsh-mcp-client` accepts; a name outside it never loads. */
+export const SERVER_NAME_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
 /** The registry's per-version metadata block. */
 const OFFICIAL_META = 'io.modelcontextprotocol.registry/official';
 const PAGE_LIMIT = 100;
@@ -982,6 +984,51 @@ export function serverNameFor(name, taken = []) {
   return `${base.slice(0, 26)}-${createHash('sha1').update(name).digest('hex').slice(0, 4)}`;
 }
 
+/** The row id one entry's generated bundle owns. Derived from the slug, so it is stable. */
+export function rowIdForSlug(slug) {
+  return `${ROW_PREFIX}${slug}`;
+}
+
+/**
+ * Decide the identity one install writes: the row id, and the `serverName` it loads under.
+ *
+ * `serverName` is not decoration — the model calls this server's tools `mcp__<serverName>__<tool>`,
+ * so the name is a contract with everything already written against the row. It therefore may not
+ * move on its own:
+ *
+ * - A **new** row takes the readable name derived from the registry entry, deduplicated against the
+ *   names the other rows already hold.
+ * - An **existing** row keeps the id and the `serverName` it already has. That is the whole fix:
+ *   feeding the row's own name back in as a *taken* name is what renamed `notes` to `notes-2`
+ *   on reinstall, and back again on the next one.
+ * - If the name it must keep is now held by **another** row, this reports a conflict. Renaming would
+ *   silently break every `mcp__<name>__*` reference, and writing a duplicate would give the client
+ *   two rows claiming one name — so neither is done on the caller's behalf.
+ *
+ * @param options - `{name, slug, taken, current}`. `taken` must already exclude this row; `current`
+ *   is `{rowId, serverName}` when the row exists, and `null` for a first install.
+ * @returns `{ok, mode, rowId, serverName}`, or `{ok: false, reason}` when the identity cannot be kept.
+ */
+export function resolveIdentity({ name, slug, taken = [], current = null }) {
+  const rowId = current !== null && typeof current.rowId === 'string' && current.rowId !== ''
+    ? current.rowId
+    : rowIdForSlug(slug);
+  if (current === null) {
+    return { ok: true, mode: 'fresh', rowId, serverName: serverNameFor(name, taken) };
+  }
+  const serverName = typeof current.serverName === 'string' ? current.serverName.trim() : '';
+  if (serverName === '') {
+    return { ok: false, mode: 'update', rowId, serverName, reason: `the installed row ${rowId} carries no serverName to reuse, so it cannot be updated without renaming it` };
+  }
+  if (!SERVER_NAME_PATTERN.test(serverName)) {
+    return { ok: false, mode: 'update', rowId, serverName, reason: `the installed row's serverName "${serverName}" is outside the name the MCP client accepts` };
+  }
+  if (taken.includes(serverName)) {
+    return { ok: false, mode: 'update', rowId, serverName, reason: `serverName "${serverName}" is now held by another MCP row; renaming this one would break every mcp__${serverName}__* reference, so the update is refused` };
+  }
+  return { ok: true, mode: 'update', rowId, serverName };
+}
+
 /** A YAML double-quoted scalar; JSON string escaping is valid YAML. */
 function yamlString(value) {
   return JSON.stringify(String(value));
@@ -1311,18 +1358,20 @@ export function manifestFor(slug) {
 /**
  * Write (or rewrite) one generated bundle.
  *
- * @param options - `{slug, server, serverName, plan, args, config, argumentKeys}`.
+ * @param options - `{slug, rowId, server, serverName, plan, args, config, argumentValues, mcpbInfo}`.
+ *   `rowId` is the identity `resolveIdentity` settled on; omitting it derives the default, which is
+ *   what every row written by this plugin has always been.
  * @returns `{slug, dir, pkg, rowId}`.
  */
-export function writeBundle({ slug, server, serverName, plan, args, config, argumentValues, mcpbInfo }) {
+export function writeBundle({ slug, rowId = '', server, serverName, plan, args, config, argumentValues, mcpbInfo }) {
   const dir = bundleDir(slug);
   ensureRoot();
   mkdirSync(dir, { recursive: true });
   const pkg = `${BUNDLE_PREFIX}${slug}`;
-  const rowId = `${ROW_PREFIX}${slug}`;
+  const identity = rowId === '' ? rowIdForSlug(slug) : rowId;
   const origin = server.source === 'local' ? 'a local entry' : 'the official MCP registry';
   writeFileSync(join(dir, 'package.json'), renderPackageJson(slug, server.version, `${server.title} — installed from ${origin}`), 'utf8');
-  writeFileSync(join(dir, 'cordis.patch.yml'), renderPatch({ rowId, serverName, plan, args, config, source: server.source }), 'utf8');
+  writeFileSync(join(dir, 'cordis.patch.yml'), renderPatch({ rowId: identity, serverName, plan, args, config, source: server.source }), 'utf8');
   const envKeys = Object.keys(config);
   writeFileSync(join(dir, 'market.meta.json'), `${JSON.stringify({
     registryName: server.name,
@@ -1333,7 +1382,7 @@ export function writeBundle({ slug, server, serverName, plan, args, config, argu
     mcpb: mcpbInfo === undefined ? null : mcpbInfo,
     slug,
     pkg,
-    rowId,
+    rowId: identity,
     serverName,
     kind: plan.kind,
     registryType: plan.registryType,
@@ -1344,7 +1393,7 @@ export function writeBundle({ slug, server, serverName, plan, args, config, argu
     url: plan.kind === 'http' ? plan.url : null,
     configKeys: envKeys,
   }, null, 2)}\n`, 'utf8');
-  return { slug, dir, pkg, rowId };
+  return { slug, dir, pkg, rowId: identity };
 }
 
 /** Delete one generated bundle directory. */
