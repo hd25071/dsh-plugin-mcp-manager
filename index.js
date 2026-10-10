@@ -862,7 +862,8 @@ async function marketInstallResponse(request, ctx) {
       plan.command = mapped.command;
       plan.env = mapped.env;
       installArgs = mapped.args;
-      // A count, not the listing: the manifest is an audit record, and the entry names are noise.\n      mcpbInfo = { identifier: plan.identifier, bytes: fetched.bytes, entries: fetched.entries.length, entryPoint: mapped.entryPoint };
+      // A count, not the listing: the manifest is an audit record, and the entry names are noise.
+      mcpbInfo = { identifier: plan.identifier, bytes: fetched.bytes, entries: fetched.entries.length, entryPoint: mapped.entryPoint };
     } catch (error) {
       return failure('mcpb-install-crashed', `mcpb 安装过程出错：${String((error && error.message) || error)}`, 500);
     }

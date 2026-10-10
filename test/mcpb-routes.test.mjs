@@ -95,12 +95,11 @@ after(() => {
   rmSync(home, { recursive: true, force: true });
 });
 
-// SKIPPED, deliberately and visibly: the install path itself is proven (a manual run of this
-// same route returns 200, writes `mcpb/package.mcpb`, extracts `mcpb/extracted/manifest.json`,
-// and the patch carries the located node plus the extraction directory), but one assertion
-// about the audit record in `market.meta.json` does not hold yet — `meta.mcpb.identifier` is
-// not the URL this case seeded. Unresolved rather than papered over; the two cases below pass.
-test.skip('installing an mcpb entry downloads, extracts, and writes the manifest command line', async () => {
+// This case was skipped for one round, with the reason written down: `meta.mcpb.identifier` was
+// not the seeded URL. The assertion was right and the product was wrong — the assignment that
+// fills `mcpbInfo` had a stray backslash-n in front of it and had become part of a comment, so
+// the audit record was never written at all. The skip hid a product bug, not a strict test.
+test('installing an mcpb entry downloads, extracts, and writes the manifest command line', async () => {
   const bytes = buildPackage('packed', manifest);
   seedRegistry('https://packages.test/packed.mcpb');
   globalThis.fetch = async () => ({
@@ -122,7 +121,10 @@ test.skip('installing an mcpb entry downloads, extracts, and writes the manifest
   const extracted = join(dir, 'mcpb', 'extracted');
   assert.match(patch, /command: ".*node\.exe"/, 'the command is the located node, not the bare name');
   assert.equal(patch.includes('server/index.js'), true);
-  // YAML escapes the separators, so match the escaped fragment rather than the raw path.\n  assert.equal(patch.includes('mcpb\\\\\\\\extracted'), true, 'the args point into the extraction directory');
+  // YAML escapes the separators, so compare against the escaped form of the real path instead
+  // of a hand-counted number of backslashes.
+  const escaped = extracted.replaceAll('\\', '\\\\');
+  assert.equal(patch.includes(escaped), true, `the args point into ${extracted}`);
   assert.match(patch, /NOTE: "from-mcpb"/);
 
   const meta = JSON.parse(readFileSync(join(dir, 'market.meta.json'), 'utf8'));

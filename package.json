@@ -34,6 +34,8 @@
   "files": [
     "index.js",
     "market.js",
+    "mcpb.js",
+    "local.js",
     "client.js",
     "cordis.patch.yml",
     "README.md",
