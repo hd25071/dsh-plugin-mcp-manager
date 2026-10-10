@@ -162,3 +162,68 @@ test('a package the manifest rules refuse returns 400 with that reason', async (
   assert.match(result.body.error.message, /不支持 Windows/);
   assert.equal(market.listInstalled().length, 0);
 });
+
+// The fields an mcpb package needs live inside the package, so the dialog cannot render a form
+// before the download. Refusing the first attempt with those fields attached is what makes the
+// second attempt possible — and installing with them blank is what produced a row that started,
+// exposed nothing, and looked like the package's fault. Found on a real package (petty declares
+// two required fields); 7 of the 23 smallest mcpb packages in the registry do the same.
+test('an mcpb package with required config is refused with its fields, then installs once they arrive', async () => {
+  const required = {
+    ...manifest,
+    server: {
+      type: 'node',
+      entry_point: 'server/index.js',
+      mcp_config: {
+        command: 'node',
+        args: ['${__dirname}/server/index.js'],
+        env: { API_URL: '${user_config.api_url}', TOKEN: '${user_config.token}' },
+      },
+    },
+    user_config: {
+      api_url: { type: 'string', title: 'Address', required: true },
+      token: { type: 'string', title: 'Token', sensitive: true, required: true },
+      note: { type: 'string', title: 'Note' },
+    },
+  };
+  const bytes = buildPackage('needs-config', required);
+  seedRegistry('https://packages.test/needs-config.mcpb');
+  globalThis.fetch = async () => ({
+    ok: true, status: 200,
+    arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+  });
+
+  const { routes, calls } = makeCtx();
+  const refused = await call(routes, host.MARKET_INSTALL_PATH, post({ name: 'vendor.example/packed', optionIndex: 0 }));
+  assert.equal(refused.status, 400);
+  assert.equal(refused.body.error.code, 'mcpb-config-required');
+  assert.match(refused.body.error.message, /api_url/);
+  assert.match(refused.body.error.message, /token/);
+  assert.deepEqual(
+    refused.body.value.variables.map((variable) => [variable.name, variable.isRequired]),
+    [['api_url', true], ['token', true], ['note', false]],
+    'the dialog is handed the fields to ask for, and only the required ones are marked',
+  );
+  assert.equal(market.listInstalled().length, 0, 'and nothing was written while the form is empty');
+
+  const installed = await call(routes, host.MARKET_INSTALL_PATH, post({
+    name: 'vendor.example/packed',
+    optionIndex: 0,
+    config: { api_url: 'https://packages.test/api', token: 'demo_token', note: '' },
+  }));
+  assert.equal(installed.status, 200, JSON.stringify(installed.body));
+
+  const dir = market.bundleDir(installed.body.value.slug);
+  const patch = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8');
+  assert.match(patch, /API_URL: "https:\/\/packages\.test\/api"/);
+  assert.match(patch, /TOKEN: "demo_token"/);
+  assert.equal(patch.includes('${user_config'), false, 'no placeholder survived into the patch');
+  // The collected values are the package's own inputs, not env names: writing them into `env`
+  // under their raw key names would hand the server a second, differently named copy.
+  assert.equal(/^\s+api_url:/m.test(patch), false, 'the raw user_config key is not an env var');
+  assert.equal(/^\s+token:/m.test(patch), false, 'and neither is the secret one');
+  assert.deepEqual(calls.install.map((item) => item.dir), [dir]);
+
+  const meta = JSON.parse(readFileSync(join(dir, 'market.meta.json'), 'utf8'));
+  assert.deepEqual(meta.configKeys, ['api_url', 'token'], 'the values that were filled in are recorded');
+});

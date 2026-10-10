@@ -196,6 +196,22 @@ function referencedKeys(text) {
 }
 
 /**
+ * Every key the manifest declares under `user_config`.
+ *
+ * The install form cannot know these before the download, so the install route asks for them
+ * here rather than trusting the plan it was given — that plan has no variables at all.
+ *
+ * @param manifest - the parsed `manifest.json`.
+ * @returns the declared key names, in declaration order.
+ */
+export function declaredConfigKeys(manifest) {
+  const declared = manifest !== null && typeof manifest === 'object' && manifest.user_config && typeof manifest.user_config === 'object'
+    ? manifest.user_config
+    : {};
+  return Object.keys(declared);
+}
+
+/**
  * Turn a manifest into the row's command line.
  *
  * @param manifest - the parsed `manifest.json`.
@@ -238,13 +254,14 @@ export function manifestToPlan(manifest, extractedDir, userConfig = {}, options 
 
   // The form has to ask for anything the manifest references and does not itself define.
   const declared = manifest.user_config && typeof manifest.user_config === 'object' ? manifest.user_config : {};
+  const declaredKeys = declaredConfigKeys(manifest);
   const referenced = [
     ...referencedKeys(rawCommand),
     ...(Array.isArray(config.args) ? config.args.flatMap((value) => referencedKeys(value)) : []),
     ...(config.env && typeof config.env === 'object' ? Object.values(config.env).flatMap((value) => referencedKeys(value)) : []),
   ];
   const variables = [];
-  for (const key of [...new Set([...Object.keys(declared), ...referenced])]) {
+  for (const key of [...new Set([...declaredKeys, ...referenced])]) {
     const spec = declared[key] && typeof declared[key] === 'object' ? declared[key] : {};
     const hasValue = userConfig[key] !== undefined && userConfig[key] !== null && String(userConfig[key]) !== '';
     variables.push({

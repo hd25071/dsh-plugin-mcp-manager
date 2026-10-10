@@ -985,7 +985,10 @@ export function renderPatch({ rowId, serverName, plan, args, config, source }) {
     lines.push('        args:');
     for (const argument of args || []) lines.push(`          - ${yamlString(argument)}`);
     if ((args || []).length === 0) lines.push('          []');
-    const env = { ...plan.env, ...config };
+    // An mcpb package's env is already derived from its manifest, and the values the form
+    // collected are that package's own `user_config` inputs — a different namespace. Merging
+    // them here would write every input a second time under its raw key name.
+    const env = plan.registryType === 'mcpb' ? { ...plan.env } : { ...plan.env, ...config };
     const keys = Object.keys(env);
     lines.push('        env:');
     if (keys.length === 0) lines.push('          {}');
@@ -1197,6 +1200,19 @@ function writePruneReport(report) {
  */
 export async function fetchMcpb(identifier, targetDir) {
   return mcpb.downloadAndExtract(identifier, targetDir);
+}
+
+/**
+ * Every `user_config` key a manifest declares.
+ *
+ * Re-exported because the install route needs it before it can map the manifest: the keys the
+ * form is allowed to send for an mcpb entry come from the package, not from the plan.
+ *
+ * @param manifest - the parsed `manifest.json`.
+ * @returns the declared key names.
+ */
+export function declaredConfigKeys(manifest) {
+  return mcpb.declaredConfigKeys(manifest);
 }
 
 /**

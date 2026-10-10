@@ -35,7 +35,12 @@ window.__ModuleLoader__.load({
       const body = await response.json().catch(() => null);
       if (!response.ok || !body || body.ok !== true) {
         const message = (body && body.error && body.error.message) || ('HTTP ' + String(response.status));
-        throw new Error(message);
+        const error = new Error(message);
+        // A refusal can carry more than a sentence. The mcpb install answers with the form
+        // fields its manifest declares, which the dialog cannot know before the download.
+        error.code = (body && body.error && body.error.code) || '';
+        error.payload = body && body.value !== undefined && body.value !== null ? body.value : null;
+        throw error;
       }
       return body.value;
     }
@@ -1147,6 +1152,9 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false);
       const [error, setError] = React.useState('');
       const [result, setResult] = React.useState(null);
+      // True once the fields below arrived with a refusal rather than with the plan: the dialog
+      // can only learn them by asking the host to read the package's manifest.
+      const [discovered, setDiscovered] = React.useState(false);
 
       React.useEffect(() => {
         let live = true;
@@ -1179,6 +1187,19 @@ window.__ModuleLoader__.load({
           setResult(value);
           if (onDone) onDone();
         } catch (e) {
+          // An mcpb package declares its fields inside the package, so the first attempt is
+          // refused with them attached. Fold them into the option and the same form renders —
+          // fill them in, press install again, and the second attempt carries the values.
+          const fields = e && e.code === 'mcpb-config-required' && e.payload && Array.isArray(e.payload.variables)
+            ? e.payload.variables
+            : null;
+          if (fields !== null && fields.length > 0) {
+            setDetail((current) => (current === null ? current : {
+              ...current,
+              options: current.options.map((item, index) => (index === optionIndex ? { ...item, variables: fields } : item)),
+            }));
+            setDiscovered(true);
+          }
           setError(String((e && e.message) || e));
         } finally {
           setBusy(false);
@@ -1253,7 +1274,9 @@ window.__ModuleLoader__.load({
             // to show yet — saying so is more honest than an empty command block.
             ? h('div', null,
                 h('div', { className: 'mcpm-note' }, '📦 这是一个 mcpb 包，安装时将下载并解压到本地执行'),
-                h('div', { className: 'mcpm-note' }, '⚠️ 命令由包内 manifest 决定，安装后才能确定'),
+                h('div', { className: 'mcpm-note' }, discovered
+                  ? '已读到包内 manifest 声明的配置字段，填好后再次点「安装」。'
+                  : '⚠️ 命令由包内 manifest 决定，安装后才能确定'),
               )
             : option
               ? h('div', null,

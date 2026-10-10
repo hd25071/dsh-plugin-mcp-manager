@@ -857,8 +857,34 @@ async function marketInstallResponse(request, ctx) {
       const targetDir = join(market.bundleDir(slug), 'mcpb');
       const fetched = await market.fetchMcpb(plan.identifier, targetDir);
       if (!fetched.ok) return failure('mcpb-download-failed', fetched.reason, 400);
+      // The form cannot know these keys before the download — they live in the manifest, and the
+      // plan offered for an mcpb entry declares no variables at all. So the request's values are
+      // accepted here, against the keys the manifest actually declares, and only then is the
+      // manifest mapped: a value that arrived is what makes `isRequired` go quiet.
+      const declared = new Set(market.declaredConfigKeys(fetched.manifest));
+      for (const [key, value] of Object.entries(body.config || {})) {
+        if (!declared.has(key)) continue;
+        if (typeof value !== 'string' || value === '') continue;
+        config[key] = value;
+      }
       const mapped = market.planFromMcpb(fetched.manifest, fetched.extractedDir, config, ctx);
       if (!mapped.ok) return failure('mcpb-manifest-rejected', mapped.reason, 400);
+      // Refused rather than installed with blanks: a row whose required configuration is empty
+      // starts, exposes nothing, and reports "0 tools" — the failure would look like the
+      // package's fault. The declared fields travel back so the dialog can ask for them.
+      const unfilled = mapped.variables
+        .filter((variable) => variable.isRequired && (config[variable.name] === undefined || config[variable.name] === ''))
+        .map((variable) => variable.name);
+      if (unfilled.length > 0) {
+        return json({
+          ok: false,
+          error: {
+            code: 'mcpb-config-required',
+            message: `这个包需要先填写配置才能安装：${unfilled.join('、')}`,
+          },
+          value: { identifier: plan.identifier, variables: mapped.variables },
+        }, 400);
+      }
       plan.command = mapped.command;
       plan.env = mapped.env;
       installArgs = mapped.args;
