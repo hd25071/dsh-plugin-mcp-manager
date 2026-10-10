@@ -99,6 +99,26 @@ function metaOf(entry) {
 }
 
 /**
+ * The project's home, when the entry names one.
+ *
+ * The raw entry carries `repository: {url, source}` — 35 of 100 sampled entries on 2026-10-10
+ * had one. It matters because a repository URL is the only identity that survives a change of
+ * source: a display name and a package identifier mean different things in the official
+ * registry, in a community list and in a hosted directory, while a repo URL means the same
+ * thing in all three. This is what cross-source dedup will key on, so it is kept now even
+ * though nothing reads it yet.
+ *
+ * @param server - the entry's `server` block, or a whole entry already in this shape.
+ * @returns the URL, or `null` when the entry names none.
+ */
+function repositoryOf(server) {
+  const raw = server.repository;
+  if (typeof raw === 'string') return raw === '' ? null : raw;
+  if (raw !== null && typeof raw === 'object' && typeof raw.url === 'string' && raw.url !== '') return raw.url;
+  return null;
+}
+
+/**
  * Normalize one registry entry, or drop it.
  *
  * Dropped: anything not `active`, and every version that is not `isLatest` — the registry
@@ -175,6 +195,7 @@ export function normalize(entry) {
     description: typeof server.description === 'string' ? server.description : '',
     version: typeof server.version === 'string' ? server.version : '',
     publishedAt: typeof meta.publishedAt === 'string' ? meta.publishedAt : null,
+    repository: repositoryOf(server),
     packages,
     remotes,
   };

@@ -33,6 +33,20 @@ test('normalize drops deprecated and non-latest entries', () => {
   assert.equal(market.normalize({ server: { title: 'no name' }, _meta: {} }), null);
 });
 
+// The registry carries `repository: {url, source}` on the entry, and it is the only identity that
+// means the same thing in the official registry, in a community list and in a hosted directory.
+// Cross-source dedup will key on it, so dropping it at normalize time would quietly make that
+// impossible — the mistake this case exists to prevent.
+test('normalize keeps the repository url, and says so plainly when there is none', () => {
+  const withRepo = { ...entry('a/repo'), server: { ...entry('a/repo').server, repository: { url: 'https://github.com/example/notes', source: 'github' } } };
+  assert.equal(market.normalize(withRepo).repository, 'https://github.com/example/notes');
+  // A flat entry (already in this shape) must survive being normalized again.
+  assert.equal(market.normalize({ ...market.normalize(withRepo), repository: 'https://github.com/example/notes' }).repository, 'https://github.com/example/notes');
+  assert.equal(market.normalize(entry('a/none')).repository, null, 'absent is null, not an empty string');
+  assert.equal(market.normalize({ ...entry('a/blank'), server: { ...entry('a/blank').server, repository: { url: '' } } }).repository, null);
+  assert.equal(market.normalize({ ...entry('a/junk'), server: { ...entry('a/junk').server, repository: 'not-an-object' } }).repository, 'not-an-object', 'a string is taken at face value');
+});
+
 test('normalize keeps the fields an install needs', () => {
   const server = market.normalize(entry('vendor.example/notes', {
     packages: [npmPackage('@example/notes-mcp', [{ name: 'AI_KEY', isRequired: true, isSecret: true, description: 'key' }], [{ value: 'serve', type: 'positional' }])],
