@@ -373,6 +373,26 @@ https://github.com/hd25071/dsh-plugin-mcp-manager
 - **重新安装同一条目**会重写生成的 patch；生成的组合包不在 `hmr.root` 里，所以改动通常要等下次加载才生效
   （三期会把它加进 `hmr.root`）。
 
+## 已知限制
+
+- **约 85 条（占目录 0.6%，2026-10-10 快照）因上游数据缺失无法安装。** 这些条目在 registry 里声明了
+  `packages: []` **且** `remotes: []`，也就是"没有任何安装方式"。**这不是本插件的判据太严，而是上游数据问题**——
+  点「安装」得到的那句拒绝，陈述的就是这个事实。
+
+  判定方法（只读、可复跑）：
+
+  1. 取本机快照里所有"无可用安装方式"的条目（`~/.dsh/mcp-market/market-cache.json`）；
+  2. 逐条读注册表上**该服务器的全部版本**（不是只有最新版）：
+     `GET https://registry.modelcontextprotocol.io/v0/servers/{urlencode(name)}/versions`；
+  3. 比对每个版本的 `_meta["io.modelcontextprotocol.registry/official"].{status, isLatest}`
+     与 `server.packages` / `server.remotes`。
+
+  当日 88 条的分布：**85 条**的**每一个版本**（含 `isLatest: true` 且 `status: active`）两者都是 `[]`，
+  属永久性上游缺失；**1 条**是本机快照过期（注册表当天已补上，刷新目录即消失）；**2 条**是发布方在最新版里
+  删掉了安装声明（更早的版本曾声明过）。
+
+  > 这个数字**随快照变动**（24 小时内已有 1 条自愈），请按"类别"理解而不是记固定条数。
+
 ## 许可
 
 MIT
