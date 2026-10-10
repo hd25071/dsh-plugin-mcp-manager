@@ -323,6 +323,17 @@ async function enabledResponse(request, ctx) {
   const id = body && typeof body.id === 'string' ? body.id : '';
   const enabled = body && typeof body.enabled === 'boolean' ? body.enabled : null;
   if (id === '' || enabled === null) return failure('bad-request', 'id and boolean enabled are required', 400);
+
+  // `setPluginEnabled` acts on whatever row the caller names, so the row is resolved first and
+  // refused unless it is an MCP row. Without this the same request could stop any other plugin.
+  const editor = serviceOf(ctx, 'configEditor');
+  if (editor === undefined || typeof editor.entries !== 'function') {
+    return failure('service-unavailable', 'the configEditor service is not mounted, so the target row cannot be checked', 503);
+  }
+  const entries = editor.entries();
+  const entry = (Array.isArray(entries) ? entries : []).find((candidate) => idOfEntry(candidate) === id && moduleOfEntry(candidate) === MCP_MODULE);
+  if (entry === undefined) return failure('entry-not-found', 'no MCP row with id ' + id, 404);
+
   try {
     const result = await manager.setPluginEnabled(id, enabled);
     return json({ ok: true, value: { id, enabled, result: result === undefined ? null : result } });
