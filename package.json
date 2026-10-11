@@ -39,7 +39,8 @@
     "client.js",
     "cordis.patch.yml",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "tx.js"
   ],
   "engines": {
     "node": ">=20"

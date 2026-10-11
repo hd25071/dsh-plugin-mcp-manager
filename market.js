@@ -36,6 +36,7 @@ import {
 import { homedir } from 'node:os';
 import * as local from './local.js';
 import * as mcpb from './mcpb.js';
+import * as tx from './tx.js';
 import { delimiter, join } from 'node:path';
 
 /** The official registry endpoint that serves the catalog. */
@@ -1918,25 +1919,31 @@ export function manifestFor(slug) {
  *   what every row written by this plugin has always been.
  * @returns `{slug, dir, pkg, rowId}`.
  */
-export function writeBundle({ slug, rowId = '', server, serverName, plan, args, config, argumentValues, mcpbInfo }) {
+export function writeBundle({ slug, rowId = '', server, serverName, plan, args, config, argumentValues, mcpbInfo, dir = '', txid = '' }) {
   // Checked before anything is created: a link placed at <MARKET_ROOT>/<slug> would take every file
-  // written below it out of the market root.
-  const unsafe = bundlePathProblem(slug);
+  // written below it out of the market root. A staging directory is inside the market root too, so
+  // the same rule is applied to whichever path this call was handed.
+  const target = dir === '' ? bundleDir(slug) : dir;
+  const unsafe = target === bundleDir(slug) ? bundlePathProblem(slug) : stagingPathProblem(slug, target);
   if (unsafe !== '') {
     const error = new Error(`invalid-bundle-path: ${unsafe}`);
     error.code = 'invalid-bundle-path';
     throw error;
   }
-  const dir = bundleDir(slug);
   ensureRoot();
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(target, { recursive: true });
   const pkg = `${BUNDLE_PREFIX}${slug}`;
   const identity = rowId === '' ? rowIdForSlug(slug) : rowId;
   const origin = server.source === 'local' ? 'a local entry' : 'the official MCP registry';
-  writeFileSync(join(dir, 'package.json'), renderPackageJson(slug, server.version, `${server.title} — installed from ${origin}`), 'utf8');
-  writeFileSync(join(dir, 'cordis.patch.yml'), renderPatch({ rowId: identity, serverName, plan, args, config, source: server.source }), 'utf8');
+  const manifestJson = renderPackageJson(slug, server.version, `${server.title} — installed from ${origin}`);
+  const patchYaml = renderPatch({ rowId: identity, serverName, plan, args, config, source: server.source });
+  // Names and a hash: what the previous version was can be checked later without keeping a copy of
+  // it, and a digest of a rendered bundle is not a place a secret can hide — it is one-way.
+  const renderDigest = tx.digestOf({ 'package.json': manifestJson, 'cordis.patch.yml': patchYaml });
+  writeFileSync(join(target, 'package.json'), manifestJson, 'utf8');
+  writeFileSync(join(target, 'cordis.patch.yml'), patchYaml, 'utf8');
   const envKeys = Object.keys(config);
-  writeFileSync(join(dir, 'market.meta.json'), `${JSON.stringify({
+  writeFileSync(join(target, 'market.meta.json'), `${JSON.stringify({
     registryName: server.name,
     registryVersion: server.version,
     registryTitle: server.title,
@@ -1955,8 +1962,30 @@ export function writeBundle({ slug, rowId = '', server, serverName, plan, args, 
     argumentValues: argumentValues || {},
     url: plan.kind === 'http' ? plan.url : null,
     configKeys: envKeys,
+    // Which transaction wrote this version, and what it rendered. Both are optional for a reader:
+    // a manifest written before these fields existed simply has neither.
+    txid: txid === '' ? null : txid,
+    renderDigest,
   }, null, 2)}\n`, 'utf8');
-  return { slug, dir, pkg, rowId: identity };
+  return { slug, dir: target, pkg, rowId: identity, txid, renderDigest };
+}
+
+/**
+ * Why a staging directory must not be written to, or '' when it may.
+ *
+ * Staging lives under the market root like everything else, so a link placed where the directory
+ * belongs would send a whole bundle somewhere else — and it would be published from there.
+ */
+export function stagingPathProblem(slug, dir) {
+  try {
+    const info = lstatSync(dir);
+    if (info.isSymbolicLink()) return `the staging path ${dir} is a link, so writing through it would leave the market root`;
+    if (!info.isDirectory()) return `the staging path ${dir} is not a directory`;
+  } catch (error) {
+    if (error.code === 'ENOENT') return '';
+    return `the staging path ${dir} could not be inspected (${error.code})`;
+  }
+  return '';
 }
 
 /** Delete one generated bundle directory. */

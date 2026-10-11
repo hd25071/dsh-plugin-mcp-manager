@@ -23,8 +23,10 @@
  *
  * @module dsh-plugin-mcp-manager
  */
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import * as market from './market.js';
+import * as tx from './tx.js';
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'mcp-manager';
@@ -669,7 +671,7 @@ function identityFor(ctx, name) {
  * @param serverName - the name that row loads under.
  * @returns `{state, verified, reason}` with `state` one of `live|persisted|not-applied|unavailable`.
  */
-function postInstallVerification(ctx, manager, pkg, rowId, serverName) {
+function postInstallVerification(ctx, manager, pkg, rowId, serverName, runtime = null) {
   const rows = profileMcpRows(ctx);
   let bundles = null;
   try {
@@ -697,6 +699,15 @@ function postInstallVerification(ctx, manager, pkg, rowId, serverName) {
     };
   }
   const live = rows.some((row) => row.id === rowId && row.serverName === serverName);
+  if (live && runtime !== null && runtime.state === 'stale') {
+    // The row exists, but it is still the one that was there before this install: the running
+    // configuration has not picked the new version up, so calling it live would be a claim this
+    // process cannot support.
+    return {
+      state: 'persisted', verified: false,
+      reason: `the profile has "${pkg}", but row ${rowId} is still carrying its previous configuration in the running process`,
+    };
+  }
   if (live) return { state: 'live', verified: true, reason: '' };
   return {
     state: 'persisted', verified: false,
@@ -712,39 +723,6 @@ function installRefusalMessage(outcome) {
   if (outcome.failedAt !== '') parts.push('failed at ' + outcome.failedAt);
   if (outcome.reason !== '') parts.push(outcome.reason);
   return parts.length > 0 ? parts.join(' — ') : 'the install did not take effect';
-}
-
-/**
- * The answer a refused install gives: what failed, and what is now sitting on disk.
- *
- * P2-3A **identifies** the residue; it does not clean it up. Removing a bundle without proof that
- * nothing else depends on it — and that the profile change can be undone — is the failure mode
- * P2-3B exists to design, so no refusal path touches the filesystem or the profile.
- */
-function installRefused(code, message, status, { written, identity, result, verification }) {
-  return json({
-    ok: false,
-    error: { code, message },
-    value: {
-      slug: written.slug,
-      pkg: written.pkg,
-      dir: written.dir,
-      rowId: identity.rowId,
-      serverName: identity.serverName,
-      identity: identityValue(identity),
-      ...(verification === undefined ? {} : { verification }),
-      install: result === null || result === undefined ? null : result,
-      leftover: {
-        bundle: written.dir,
-        files: ['package.json', 'cordis.patch.yml', 'market.meta.json'],
-        from: identity.mode,
-        orphaned: true,
-        note: identity.mode === 'update'
-          ? 'the row still points at this directory, but with the newly written content: a failed update replaces it in place'
-          : 'no successful install backs this directory, and the market will keep listing it as installed until it is removed deliberately',
-      },
-    },
-  }, status);
 }
 
 /** The current profile as the DSH host describes it, or `null` when the host did not say. */
@@ -1146,9 +1124,23 @@ async function marketInstallResponse(request, ctx) {
     return json({ ok: false, error: { code: shared.code, message: shared.message, path: shared.path, sharedWith: shared.sharedWith } }, 409);
   }
 
+  const slug = identity.slug;
+  // What an earlier run left behind is reported, never adopted. Its owner cannot be proven from
+  // here, and continuing would write over state somebody else may still need.
+  const leftover = tx.residue(market.MARKET_ROOT, slug);
+  if (leftover.present) {
+    return json({
+      ok: false,
+      error: {
+        code: 'residue-present',
+        message: `an earlier transaction on ${slug} did not finish (${leftover.reason}); it is left exactly as it is for a person to look at`,
+        residue: { journal: leftover.journal, staging: leftover.staging, backups: leftover.backups },
+      },
+    }, 409);
+  }
+
   // A reinstall keeps whatever the row already carries: the user's secrets are in the
   // profile, not in this request, and regenerating the patch from scratch would drop them.
-  const slug = identity.slug;
   const existing = identity.manifest;
   const previous = existing === null ? {} : currentRowConfig(ctx, identity.rowId);
 
@@ -1182,17 +1174,47 @@ async function marketInstallResponse(request, ctx) {
   // What the bundle is written with. An mcpb plan replaces it below, once its manifest has
   // been read — `args` itself is a const, which an earlier attempt here learned the hard way.
   let installArgs = args;
-  // An mcpb plan carries no command line: it lives in the package's manifest, which only
-  // exists after the download. So the download happens here, inside the bundle directory the
-  // install already owns, and its manifest decides what actually runs.
+
+  // ---------------------------------------------------------------------------------------------
+  // From here on everything belongs to one transaction. It is staged in full, announced in a
+  // journal before either rename, and only then published and applied — so a failure at any point
+  // can either put the previous version back or say plainly that it could not.
+  // ---------------------------------------------------------------------------------------------
+  const txid = tx.newTxid();
+  const paths = tx.txPaths(market.MARKET_ROOT, slug);
+  const staged = tx.openStaging(market.MARKET_ROOT, slug, txid);
+  if (staged.ok !== true) {
+    return failure('staging-failed', `a staging directory could not be made: ${staged.reason}`, 500);
+  }
+  const backupPath = join(paths.backup, txid);
+  const announce = (phase, intent) => tx.writeJournal(market.MARKET_ROOT, slug, {
+    txid,
+    slug,
+    phase,
+    intent,
+    operation: identity.mode === 'update' ? 'update' : 'install',
+    expected: { rowId: identity.rowId, serverName },
+    staging: relativeOf(market.MARKET_ROOT, staged.dir),
+    backup: relativeOf(market.MARKET_ROOT, backupPath),
+    profile: currentProfileName(ctx),
+  });
+  /** Nothing has been published yet, so giving up only has to drop the staging directory. */
+  const abandon = (response) => {
+    tx.discardStaging(market.MARKET_ROOT, slug, txid);
+    return response;
+  };
+
+  // An mcpb plan carries no command line: it lives in the package's manifest, which only exists
+  // after the download. The download happens inside the staging directory, so the published bundle
+  // is not touched before the whole next version is known to be complete.
   let mcpbInfo = null;
   if (plan.needsDownload === true && plan.registryType === 'mcpb') {
     // Wrapped because an exception here leaves the route with no body, and the UI then shows a
     // bare "HTTP 400" — the silent failure this whole round has been about, in a new place.
     try {
-      const targetDir = join(market.bundleDir(slug), 'mcpb');
+      const targetDir = join(staged.dir, 'mcpb');
       const fetched = await market.fetchMcpb(plan.identifier, targetDir);
-      if (!fetched.ok) return failure('mcpb-download-failed', fetched.reason, 400);
+      if (!fetched.ok) return abandon(failure('mcpb-download-failed', fetched.reason, 400));
       // The form cannot know these keys before the download — they live in the manifest, and the
       // plan offered for an mcpb entry declares no variables at all. So the request's values are
       // accepted here, against the keys the manifest actually declares, and only then is the
@@ -1203,8 +1225,11 @@ async function marketInstallResponse(request, ctx) {
         if (typeof value !== 'string' || value === '') continue;
         config[key] = value;
       }
-      const mapped = market.planFromMcpb(fetched.manifest, fetched.extractedDir, config, ctx);
-      if (!mapped.ok) return failure('mcpb-manifest-rejected', mapped.reason, 400);
+      // The command line has to name where the files will END UP, not where they are now: staging
+      // is renamed into place before anything runs, so a path into the staging directory would be
+      // a path into a directory that does not exist by the time the server starts.
+      const mapped = market.planFromMcpb(fetched.manifest, join(market.bundleDir(slug), 'mcpb', 'extracted'), config, ctx);
+      if (!mapped.ok) return abandon(failure('mcpb-manifest-rejected', mapped.reason, 400));
       // Refused rather than installed with blanks: a row whose required configuration is empty
       // starts, exposes nothing, and reports "0 tools" — the failure would look like the
       // package's fault. The declared fields travel back so the dialog can ask for them.
@@ -1212,14 +1237,14 @@ async function marketInstallResponse(request, ctx) {
         .filter((variable) => variable.isRequired && (config[variable.name] === undefined || config[variable.name] === ''))
         .map((variable) => variable.name);
       if (unfilled.length > 0) {
-        return json({
+        return abandon(json({
           ok: false,
           error: {
             code: 'mcpb-config-required',
             message: `这个包需要先填写配置才能安装：${unfilled.join('、')}`,
           },
           value: { identifier: plan.identifier, variables: mapped.variables },
-        }, 400);
+        }, 400));
       }
       plan.command = mapped.command;
       plan.env = mapped.env;
@@ -1227,7 +1252,7 @@ async function marketInstallResponse(request, ctx) {
       // A count, not the listing: the manifest is an audit record, and the entry names are noise.
       mcpbInfo = { identifier: plan.identifier, bytes: fetched.bytes, entries: fetched.entries.length, entryPoint: mapped.entryPoint };
     } catch (error) {
-      return failure('mcpb-install-crashed', `mcpb 安装过程出错：${String((error && error.message) || error)}`, 500);
+      return abandon(failure('mcpb-install-crashed', `mcpb 安装过程出错：${String((error && error.message) || error)}`, 500));
     }
   }
 
@@ -1236,19 +1261,69 @@ async function marketInstallResponse(request, ctx) {
   // a bad name cannot leave half a bundle behind — and it is refused, never quietly dropped.
   const keyBlock = market.configBlockFor(plan, config);
   const keyCheck = market.checkBlockKeys(keyBlock.kind, keyBlock.values);
-  if (keyCheck.ok !== true) return failure(keyCheck.code, keyCheck.reason, 400);
+  if (keyCheck.ok !== true) return abandon(failure(keyCheck.code, keyCheck.reason, 400));
 
-  let written;
-  try {
-    written = market.writeBundle({ slug, rowId: identity.rowId, server, serverName, plan, args: installArgs, config, argumentValues, mcpbInfo });
-  } catch (error) {
+  // What the profile holds before the installer runs. A change found afterwards has to be
+  // attributable to this transaction before anything is undone; an unreadable profile is not an
+  // unchanged one, and is treated as the more dangerous of the two.
+  const profileBefore = profileFingerprint(ctx, manager);
+
+  const stagedWrite = tx.writeStaged(market.MARKET_ROOT, slug, txid, (dir) => market.writeBundle({
+    slug, rowId: identity.rowId, server, serverName, plan, args: installArgs, config, argumentValues, mcpbInfo, dir, txid,
+  }));
+  if (stagedWrite.ok !== true) {
+    const reason = stagedWrite.reason;
     // A bundle path that is a link is not a failed write but a refused one: nothing may be written
     // through it, and nothing was.
-    if (error !== null && error !== undefined && error.code === 'invalid-bundle-path') {
-      return failure('invalid-bundle-path', String(error.message), 409);
-    }
-    return failure('write-failed', String((error && error.message) || error), 500);
+    if (reason.includes('invalid-bundle-path')) return failure('invalid-bundle-path', reason, 409);
+    return failure('staging-failed', `the bundle could not be staged: ${reason}`, 500);
   }
+  // The installer is handed the published path, not the staging path: that is the directory the
+  // profile's package manager links to, and the one every reader of the manifest will find.
+  const written = { ...stagedWrite.result, dir: market.bundleDir(slug) };
+
+  // A download just happened, which is long enough for another profile to start using this bundle.
+  // So the answer is asked again, immediately before anything is published.
+  const again = sharedBundleRefusal(ctx, slug);
+  if (again.ok !== true) {
+    return abandon(json({ ok: false, error: { code: again.code, message: again.message, path: again.path, sharedWith: again.sharedWith } }, 409));
+  }
+
+  const journaled = announce('JOURNALED', 'backup-and-publish');
+  if (journaled.ok !== true) {
+    return abandon(failure('journal-failed', `the transaction could not be recorded, so nothing was changed: ${journaled.reason}`, 500));
+  }
+
+  const published = tx.publish({
+    root: market.MARKET_ROOT,
+    slug,
+    bundleDir: market.bundleDir(slug),
+    txid,
+    existed: existsSync(market.bundleDir(slug)),
+    announce,
+  });
+  if (published.ok !== true) {
+    const needsRestore = published.backedUp === true || published.published === true;
+    const put = needsRestore
+      ? tx.restore({
+        root: market.MARKET_ROOT, slug, bundleDir: market.bundleDir(slug), txid, announce,
+        owns: tx.publishedTxid(market.bundleDir(slug)) === txid,
+      })
+      : { ok: true, restored: false };
+    if (put.ok !== true) {
+      announce('NEEDS_ATTENTION', 'publish-failed-restore-failed');
+      return installAttention('publish-failed', `${published.reason} — and the previous version could not be put back: ${put.reason}`, 500, {
+        written, identity, txid, journal: paths.journal, backup: backupPath,
+      });
+    }
+    tx.discardStaging(market.MARKET_ROOT, slug, txid);
+    tx.clearJournal(market.MARKET_ROOT, slug);
+    return installFailed('publish-failed', `the prepared version could not be published: ${published.reason}`, 500, {
+      written, identity, txid, phase: 'ROLLED_BACK', restored: put.restored === true, backup: backupPath,
+    });
+  }
+
+  announce('APPLYING', 'install');
   // The installer answers with a ChangeResult, and it RESOLVES even when the install failed —
   // `change()` folds every operation error into that result. So the promise settling is not the
   // news; `application` is, and it is read before anything is reported.
@@ -1256,16 +1331,29 @@ async function marketInstallResponse(request, ctx) {
   try {
     result = await manager.installBundle(written.dir, { activateNewBundles: true });
   } catch (error) {
-    return installRefused('install-failed', String((error && error.message) || error), 502, { written, identity, result: null });
+    return settleFailure('install-failed', String((error && error.message) || error), 502, {
+      ctx, manager, slug, txid, written, identity, result: null, announce, paths, backupPath, profileBefore,
+    });
   }
   const outcome = market.installOutcome(result);
   if (outcome.ok !== true) {
-    return installRefused(outcome.code, installRefusalMessage(outcome), 502, { written, identity, result });
+    return settleFailure(outcome.code, installRefusalMessage(outcome), 502, {
+      ctx, manager, slug, txid, written, identity, result, announce, paths, backupPath, profileBefore,
+    });
   }
-  const verification = postInstallVerification(ctx, manager, written.pkg, identity.rowId, serverName);
+  const runtime = runtimeVerdict(ctx, identity.rowId, previous);
+  announce('VERIFYING', 'verify');
+  const verification = postInstallVerification(ctx, manager, written.pkg, identity.rowId, serverName, runtime);
   if (verification.state === 'not-applied') {
-    return installRefused('install-not-applied', verification.reason, 500, { written, identity, result, verification });
+    return settleFailure('install-not-applied', verification.reason, 500, {
+      ctx, manager, slug, txid, written, identity, result, verification, announce, paths, backupPath, profileBefore,
+    });
   }
+  announce('DONE', 'done');
+  // A finished transaction keeps nothing: the journal has served its purpose, the backup is no
+  // longer needed, and the staging directory is already the published bundle.
+  tx.discardBackup(market.MARKET_ROOT, slug, txid);
+  tx.clearJournal(market.MARKET_ROOT, slug);
   return json({
     ok: true,
     value: {
@@ -1274,6 +1362,9 @@ async function marketInstallResponse(request, ctx) {
       dir: written.dir,
       rowId: identity.rowId,
       serverName,
+      txid,
+      phase: 'DONE',
+      renderDigest: written.renderDigest,
       // "reinstalled" means the profile really has this row. It used to mean only that files for
       // this slug were on disk, which an install that never took effect also leaves behind.
       reinstalled: identity.mode === 'update',
@@ -1282,11 +1373,167 @@ async function marketInstallResponse(request, ctx) {
       // How far this request actually got: `live`, `persisted` (the profile has it, the running
       // process does not — the honest reading of `restart-required`), or `unavailable`.
       verification,
+      runtime,
+      outcome: outcomeOf(verification, result),
       install: result === undefined ? null : result,
     },
   });
 }
 
+/** A path as the journal records it: relative to the market root, so it moves with the root. */
+function relativeOf(root, full) {
+  return full.startsWith(root) ? full.slice(root.length + 1).split('\\').join('/') : full;
+}
+
+/** The name of the profile asking, or an empty string when the host did not say. */
+function currentProfileName(ctx) {
+  const profile = currentProfileOf(ctx);
+  return profile === null ? '' : profile.name;
+}
+
+/**
+ * What the profile holds right now, in a form two moments can be compared in.
+ *
+ * `null` is not "nothing": it is "this cannot be read", which a compensation decision has to treat
+ * as the more dangerous answer, not as an empty profile.
+ */
+function profileFingerprint(ctx, manager) {
+  const rows = profileMcpRows(ctx);
+  let bundles = null;
+  try {
+    if (manager !== undefined && typeof manager.listBundles === 'function') {
+      const listed = manager.listBundles();
+      if (Array.isArray(listed)) bundles = listed.map((item) => (item === null || typeof item !== 'object' ? '' : String(item.name)));
+    }
+  } catch {
+    bundles = null;
+  }
+  if (rows === null || bundles === null) return null;
+  return JSON.stringify({
+    rows: rows.map((row) => [row.id, row.serverName]),
+    bundles: bundles.slice().sort(),
+  });
+}
+
+/** How the row this install wrote compares with the one the profile was already carrying. */
+function runtimeVerdict(ctx, rowId, previousConfig) {
+  const rows = profileMcpRows(ctx);
+  if (rows === null) return { state: 'unknown', detail: 'the configEditor service cannot list rows' };
+  const row = rows.find((candidate) => candidate.id === rowId) || null;
+  if (row === null) return { state: 'absent', detail: 'the row is not in the running configuration' };
+  const current = currentRowConfig(ctx, rowId);
+  if (JSON.stringify(current) !== JSON.stringify(previousConfig)) {
+    return { state: 'matches', detail: 'the running configuration carries a different row than it did before' };
+  }
+  return {
+    state: 'stale',
+    detail: 'the row in the running configuration is still the one that was there before this install',
+  };
+}
+
+/** The verdict this request answers with once the persisted and running states are both known. */
+function outcomeOf(verification, result) {
+  const application = result !== null && result !== undefined && typeof result.application === 'string' ? result.application : '';
+  if (verification.state === 'live') return 'applied';
+  if (verification.state === 'persisted') return application === 'restart-required' ? 'restart-required' : 'persisted-not-live';
+  // Nothing could be read, so nothing about this install can be confirmed — including the
+  // installer's own claim, which is exactly what could not be checked.
+  if (verification.state === 'unavailable') return 'unknown';
+  return application === '' ? 'unknown' : application;
+}
+
+/**
+ * The answer a failed install gives: what failed, and what the transaction did about it.
+ *
+ * A failure the transaction could undo is reported with the installer's own classification. One it
+ * could not is reported as needing attention, and `needsAttention` is what tells a caller that the
+ * journal and the backup on disk are the state to look at.
+ */
+function installFailed(code, message, status, { written, identity, txid, phase, restored, backup, result, verification }) {
+  return json({
+    ok: false,
+    error: { code, message, txid, phase },
+    value: {
+      slug: written.slug,
+      pkg: written.pkg,
+      dir: written.dir,
+      rowId: identity.rowId,
+      serverName: identity.serverName,
+      identity: identityValue(identity),
+      ...(verification === undefined ? {} : { verification }),
+      install: result === null || result === undefined ? null : result,
+      txid,
+      phase,
+      rollback: {
+        previousRestored: restored === true,
+        backup: restored === true ? '' : backup,
+        note: restored === true
+          ? 'the previous version was put back and the transaction left nothing behind'
+          : 'the new version was removed; there was no previous version to restore',
+      },
+    },
+  }, status);
+}
+
+/** The answer a failure gives when the transaction could not get back to where it started. */
+function installAttention(code, message, status, { written, identity, txid, journal, backup }) {
+  return json({
+    ok: false,
+    error: { code: 'needs-attention', message, cause: code, txid, phase: 'NEEDS_ATTENTION', journal, backup, needsAttention: true },
+    value: {
+      slug: written.slug,
+      pkg: written.pkg,
+      dir: written.dir,
+      rowId: identity.rowId,
+      serverName: identity.serverName,
+      identity: identityValue(identity),
+      txid,
+      phase: 'NEEDS_ATTENTION',
+      rollback: {
+        previousRestored: false,
+        backup,
+        journal,
+        note: 'this transaction could not be completed or undone, so nothing else was touched: the journal and the backup are the state to inspect',
+      },
+    },
+  }, status);
+}
+
+/**
+ * Decide what to do after the installer failed, and do only that.
+ *
+ * The profile is compared with what it held before the installer ran. A change that this request
+ * could not have made, or a profile that cannot be read at all, means the change cannot be
+ * attributed — and an unattributable profile change is never undone by calling `removeBundle`,
+ * because that call has its own effects. Everything is kept and named instead.
+ */
+function settleFailure(code, message, status, { ctx, manager, slug, txid, written, identity, result, verification, announce, paths, backupPath, profileBefore }) {
+  const after = profileFingerprint(ctx, manager);
+  const attributable = profileBefore !== null && after !== null && profileBefore === after;
+  if (!attributable) {
+    const why = profileBefore === null || after === null
+      ? 'the profile state could not be read'
+      : 'the profile changed while this install was running';
+    announce('NEEDS_ATTENTION', profileBefore === null || after === null ? 'profile-unreadable' : 'profile-changed');
+    return installAttention(code, `${message} — and ${why}, so the change cannot be attributed to this install and nothing was undone`, status, {
+      written, identity, txid, journal: paths.journal, backup: backupPath,
+    });
+  }
+  const put = tx.restore({
+    root: market.MARKET_ROOT, slug, bundleDir: market.bundleDir(slug), txid, announce,
+    owns: tx.publishedTxid(market.bundleDir(slug)) === txid,
+  });
+  if (put.ok !== true) {
+    announce('NEEDS_ATTENTION', 'restore-failed');
+    return installAttention(code, `${message} — and the previous version could not be put back: ${put.reason}`, status, {
+      written, identity, txid, journal: paths.journal, backup: backupPath,
+    });
+  }
+  tx.clearJournal(market.MARKET_ROOT, slug);
+  return installFailed(code, message, status, {
+    written, identity, txid, phase: 'ROLLED_BACK', restored: put.restored === true, backup: backupPath, result, verification,
+  });
+}
 /**
  * Remove one generated bundle: the official removal first, the directory only after it.
  *

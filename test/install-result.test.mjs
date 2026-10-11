@@ -106,11 +106,18 @@ const install = async (routes, payload = { name: ENTRY, optionIndex: 0, config: 
   return { status: response.status, body: await response.json() };
 };
 
-/** The generated bundle must still be on disk, untouched, after a refused install. */
-function assertLeftoverIntact(dir) {
-  for (const file of ['package.json', 'cordis.patch.yml', 'market.meta.json']) {
-    assert.equal(existsSync(join(dir, file)), true, file + ' must not be deleted by a failure path');
-  }
+/**
+ * What a refused install leaves behind: nothing of its own.
+ *
+ * P2-3A identified the orphan; P2-3B puts it back. The install is staged and journalled, so a
+ * failure it can undo is undone — the published directory goes, and the market stops listing a
+ * bundle no successful install backs. What must NOT happen is deleting something it cannot prove
+ * is its own; the attention paths cover exactly that case instead.
+ */
+function assertRolledBack(dir) {
+  assert.equal(existsSync(dir), false, 'the failed install leaves no bundle behind');
+  assert.equal(existsSync(market.bundleDir(market.slugFor(ENTRY))), false);
+  assert.deepEqual(market.listInstalled(), [], 'and the market does not list it as installed');
 }
 
 // --- the values the contract means as failure ------------------------------------------------
@@ -125,9 +132,9 @@ test('application failed resolves normally and must not be reported as success',
   assert.match(refused.body.error.message, /pnpm exited 1/, 'the installer diagnostic reaches the caller');
   assert.match(refused.body.error.message, /operation-error/);
   assert.equal(refused.body.value.install.application, 'failed');
-  assert.equal(refused.body.value.leftover.orphaned, true, 'the bundle left behind must be named, not hidden');
-  assert.equal(refused.body.value.leftover.bundle, calls.install[0].dir);
-  assertLeftoverIntact(calls.install[0].dir);
+  assert.equal(refused.body.value.phase, 'ROLLED_BACK', 'a failure the transaction could undo says so');
+  assert.equal(refused.body.value.rollback.previousRestored, false, 'a first install has no previous version');
+  assertRolledBack(calls.install[0].dir);
 });
 
 test('application cancelled is refused', async () => {
@@ -137,8 +144,8 @@ test('application cancelled is refused', async () => {
   assert.notEqual(refused.body.ok, true);
   assert.equal(refused.status, 502);
   assert.equal(refused.body.error.code, 'install-cancelled');
-  assert.equal(refused.body.value.leftover.orphaned, true);
-  assertLeftoverIntact(calls.install[0].dir);
+  assert.equal(refused.body.value.phase, 'ROLLED_BACK');
+  assertRolledBack(calls.install[0].dir);
 });
 
 test('application overridden is not a success for an install', async () => {
@@ -148,7 +155,7 @@ test('application overridden is not a success for an install', async () => {
   assert.notEqual(refused.body.ok, true);
   assert.equal(refused.status, 502);
   assert.equal(refused.body.error.code, 'install-overridden');
-  assertLeftoverIntact(calls.install[0].dir);
+  assertRolledBack(calls.install[0].dir);
 });
 
 test('an application value outside the contract is refused rather than assumed good', async () => {
@@ -159,7 +166,7 @@ test('an application value outside the contract is refused rather than assumed g
   assert.equal(refused.status, 502);
   assert.equal(refused.body.error.code, 'install-result-unknown');
   assert.match(refused.body.error.message, /teleported/);
-  assertLeftoverIntact(calls.install[0].dir);
+  assertRolledBack(calls.install[0].dir);
 });
 
 test('a result that is not a ChangeResult at all is refused', async () => {
@@ -169,7 +176,7 @@ test('a result that is not a ChangeResult at all is refused', async () => {
     const refused = await install(routes);
     assert.notEqual(refused.body.ok, true, JSON.stringify(result) + ' must not be read as success');
     assert.equal(refused.body.error.code, 'install-result-unverified', JSON.stringify(result));
-    assertLeftoverIntact(calls.install[0].dir);
+    assertRolledBack(calls.install[0].dir);
   }
 });
 
@@ -181,21 +188,19 @@ test('an installer that really throws is still a failure', async () => {
   assert.equal(refused.status, 502);
   assert.equal(refused.body.error.code, 'install-failed');
   assert.match(refused.body.error.message, /exploded/);
-  assertLeftoverIntact(calls.install[0].dir);
+  assertRolledBack(calls.install[0].dir);
 });
 
 // --- no destructive cleanup exists on any failure path ----------------------------------------
 
-test('a refused install never uninstalls anything and never deletes the bundle', async () => {
+test('a refused install never uninstalls anything, and takes its own bundle with it', async () => {
   seedCache();
   const { routes, calls } = makeCtx({ result: { application: 'failed', error: { code: 'operation-error', diagnostic: 'nope' } } });
   await install(routes);
   assert.deepEqual(calls.remove, [], 'no uninstall is attempted without proof that it is safe');
-  const dir = calls.install[0].dir;
-  assert.equal(existsSync(market.bundleDir(market.slugFor(ENTRY))), true);
-  assertLeftoverIntact(dir);
-  assert.deepEqual(market.listInstalled().map((item) => item.slug), [market.slugFor(ENTRY)],
-    'the orphan stays visible to the market — P2-3A identifies it, it does not make installs atomic');
+  // The rollback removes the directory it published because the manifest in it carries this
+  // transaction's id — proof of ownership, not a guess — and it never calls removeBundle.
+  assertRolledBack(calls.install[0].dir);
 });
 
 // --- the values the contract means as success --------------------------------------------------
@@ -207,8 +212,22 @@ test('application applied is a success, and reports what was verified', async ()
   assert.equal(installed.status, 200);
   assert.equal(installed.body.ok, true);
   assert.equal(installed.body.value.install.application, 'applied');
-  assert.equal(installed.body.value.verification.state, 'live');
-  assert.equal(installed.body.value.verification.verified, true);
+  // This fixture's installer never changes the row, so the row in the running configuration is
+  // still the one that was there before. Reporting that as live was the over-claim P2-3B fixes:
+  // the change is persisted, and the process has not picked it up.
+  assert.equal(installed.body.value.runtime.state, 'stale');
+  assert.equal(installed.body.value.verification.state, 'persisted');
+  assert.equal(installed.body.value.verification.verified, false);
+  assert.equal(installed.body.value.outcome, 'persisted-not-live');
+});
+
+test('an install whose profile cannot be read is not called live either', async () => {
+  seedCache();
+  const { routes } = makeCtx({ result: { application: 'applied' }, rows: 'unavailable' });
+  const installed = await install(routes);
+  assert.equal(installed.status, 200);
+  assert.equal(installed.body.value.runtime.state, 'unknown', 'an unreadable profile is not a matching one');
+  assert.notEqual(installed.body.value.outcome, 'applied');
 });
 
 test('application restart-required is a success, and is not confused with live', async () => {
@@ -229,8 +248,8 @@ test('a claim of success the profile contradicts is refused', async () => {
   assert.notEqual(refused.body.ok, true, 'the persisted profile does not have it, so nothing succeeded');
   assert.equal(refused.status, 500);
   assert.equal(refused.body.error.code, 'install-not-applied');
-  assert.equal(refused.body.value.leftover.orphaned, true);
-  assertLeftoverIntact(calls.install[0].dir);
+  assert.equal(refused.body.value.phase, 'ROLLED_BACK');
+  assertRolledBack(calls.install[0].dir);
 });
 
 // --- when the profile cannot be read, nothing may be claimed -----------------------------------
