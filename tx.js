@@ -21,8 +21,8 @@
  * store them. A transaction is therefore recoverable by inspection, never by assumption.
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 /** The shape of a journal record; bumped when a reader would have to read it differently. */
 export const TX_SCHEMA = 1;
@@ -309,4 +309,327 @@ export function publishedTxid(bundleDir) {
   } catch {
     return '';
   }
+}
+
+/**
+ * What a slug's transaction state can be, and how dangerous each one is.
+ *
+ * These are diagnoses, not instructions. Nothing in this module acts on them: naming a state is
+ * what lets a person decide, and a name is not permission to delete or rename anything.
+ */
+export const DIAGNOSIS_STATES = [
+  'clean',
+  'staged-only',
+  'backup-without-live',
+  'published-not-verified',
+  'applying-unknown',
+  'needs-attention',
+  'orphan-artifacts',
+  'journal-corrupt',
+  'txid-mismatch',
+  'profile-unreadable',
+  'lock-blocked',
+  'legacy-orphan',
+  'shared-live',
+];
+
+/** Which of the three buckets a state falls into. */
+const RISK_BY_STATE = {
+  clean: 'safe',
+  'staged-only': 'safe',
+  'backup-without-live': 'manual',
+  'published-not-verified': 'manual',
+  'applying-unknown': 'stop',
+  'needs-attention': 'stop',
+  'orphan-artifacts': 'manual',
+  'journal-corrupt': 'stop',
+  'txid-mismatch': 'stop',
+  'profile-unreadable': 'stop',
+  'lock-blocked': 'stop',
+  'legacy-orphan': 'manual',
+  'shared-live': 'manual',
+};
+
+/** The sentence a person gets next to the state. Never an action taken by this code. */
+const NEXT_STEP_BY_STATE = {
+  clean: 'nothing to do',
+  'staged-only': 'the published bundle was never replaced; the staged directory can be discarded, but only once the slug lock is free',
+  'backup-without-live': 'the published bundle is missing and an earlier version is sitting in a backup: restore it by hand after checking the journal, or reinstall',
+  'published-not-verified': 'the new version is published but was never confirmed: compare it with the backup before deciding which one should stay',
+  'applying-unknown': 'the installer may or may not have changed the profile: read the profile before touching the bundle, because the change cannot be undone from here',
+  'needs-attention': 'the transaction already decided it could not put things back: read the journal and the backup, and change nothing else',
+  'orphan-artifacts': 'these directories are not claimed by any journal, so their owner is unknown: identify them before removing anything',
+  'journal-corrupt': 'the journal cannot be read, so nothing about this slug can be attributed: inspect it by hand',
+  'txid-mismatch': 'the journal and the published bundle describe different transactions: do not assume either one is the one to keep',
+  'profile-unreadable': 'the profile could not be read, so its state is unknown: fix the profile read first',
+  'lock-blocked': 'an operation holds this slug, or left a lock behind: the holder is named, and nothing may be touched while it is there',
+  'legacy-orphan': 'this bundle was written before transactions existed and the profile does not list it as installed',
+  'shared-live': 'another profile reads this bundle: changing it in place would change what that profile loads',
+};
+
+/** A path as this API reports one: inside the market root, or plainly marked as not. */
+function reportedPath(root, full) {
+  const rel = relative(root, full);
+  if (rel === '') return '.';
+  if (isAbsolute(rel) || rel === '..' || rel.startsWith('..' + sep) || rel.startsWith('../')) return '<outside>';
+  return rel.split(sep).join('/');
+}
+
+/** A directory entry name is a claim, and only a plain name is even a plausible one. */
+function plausibleName(name) {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name);
+}
+
+/**
+ * The journal's own path fields, checked rather than trusted.
+ *
+ * A journal is a file on disk like any other, so its contents are input from outside this process:
+ * a relative path that climbs out of the transaction directory, or an absolute one, is reported as
+ * untrusted and then used for nothing at all.
+ */
+function trustPathClaim(root, slug, claim) {
+  if (typeof claim !== 'string' || claim === '') return { ok: false, relative: '' };
+  const normalized = claim.split('\\').join('/');
+  if (isAbsolute(claim) || normalized.startsWith('/') || normalized.split('/').includes('..')) {
+    return { ok: false, relative: '' };
+  }
+  const full = resolve(root, normalized);
+  const inside = resolve(join(root, '.tx', slug));
+  if (full !== inside && !full.startsWith(inside + sep)) return { ok: false, relative: '' };
+  return { ok: true, relative: normalized };
+}
+
+/**
+ * Read one slug's transaction state. Read-only: every call is a listing or a read.
+ *
+ * Symlinks are reported as symlinks and never followed, because what a link points at is not this
+ * transaction's directory and the next reader must not be told that it is.
+ */
+export function readArtifacts(root, slug) {
+  const paths = txPaths(root, slug);
+  const journal = readJournal(root, slug);
+  const scan = (dir) => {
+    let names;
+    try {
+      names = readdirSync(dir);
+    } catch (error) {
+      if (error.code === 'ENOENT') return { entries: [], unreadable: '' };
+      return { entries: [], unreadable: reportedPath(root, dir) + ' could not be listed (' + error.code + ')' };
+    }
+    const entries = [];
+    for (const name of names.sort()) {
+      const full = join(dir, name);
+      let kind = 'other';
+      try {
+        const info = lstatSync(full);
+        if (info.isSymbolicLink()) kind = 'link';
+        else if (info.isDirectory()) kind = 'dir';
+        else if (info.isFile()) kind = 'file';
+      } catch {
+        kind = 'other';
+      }
+      entries.push({ name, kind, trusted: kind === 'dir' && plausibleName(name), path: reportedPath(root, full) });
+    }
+    return { entries, unreadable: '' };
+  };
+  const staging = scan(paths.staging);
+  const backup = scan(paths.backup);
+  return {
+    journal: {
+      present: journal.ok === true ? journal.record !== null : true,
+      ok: journal.ok === true && journal.record !== null,
+      readable: journal.ok === true,
+      record: journal.ok === true ? journal.record : null,
+      reason: journal.ok === true ? '' : 'the journal could not be read as JSON',
+    },
+    staging,
+    backup,
+    paths: {
+      journal: reportedPath(root, paths.journal),
+      staging: reportedPath(root, paths.staging),
+      backups: reportedPath(root, paths.backup),
+      root: reportedPath(root, paths.slugRoot),
+    },
+  };
+}
+
+/**
+ * What the published directory claims about itself.
+ *
+ * Only identifiers, a digest and a count of configured keys are read out. The manifest also holds
+ * the values a person typed — `argumentValues` above all — and those are not this reader's to
+ * repeat into an answer.
+ */
+export function readLiveBundle(bundleDir) {
+  let info;
+  try {
+    info = lstatSync(bundleDir);
+  } catch (error) {
+    if (error.code === 'ENOENT') return { present: false, kind: 'missing', manifestOk: false, txid: '', reason: '' };
+    return { present: true, kind: 'unreadable', manifestOk: false, txid: '', reason: 'the published path could not be inspected (' + error.code + ')' };
+  }
+  if (info.isSymbolicLink()) return { present: true, kind: 'link', manifestOk: false, txid: '', reason: 'the published path is a link, so it is not this transaction\'s directory' };
+  if (!info.isDirectory()) return { present: true, kind: 'not-a-directory', manifestOk: false, txid: '', reason: 'the published path is not a directory' };
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(join(bundleDir, 'market.meta.json'), 'utf8'));
+  } catch (error) {
+    return {
+      present: true, kind: 'directory', manifestOk: false, txid: '', reason: 'the published manifest could not be read (' + (error.code || 'invalid JSON') + ')',
+    };
+  }
+  if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    return { present: true, kind: 'directory', manifestOk: false, txid: '', reason: 'the published manifest is not an object' };
+  }
+  const txid = typeof manifest.txid === 'string' ? manifest.txid : '';
+  return {
+    present: true,
+    kind: 'directory',
+    manifestOk: true,
+    txid,
+    untagged: txid === '',
+    registryName: typeof manifest.registryName === 'string' ? manifest.registryName : '',
+    rowId: typeof manifest.rowId === 'string' ? manifest.rowId : '',
+    serverName: typeof manifest.serverName === 'string' ? manifest.serverName : '',
+    renderDigest: typeof manifest.renderDigest === 'string' ? manifest.renderDigest : '',
+    configKeyCount: Array.isArray(manifest.configKeys) ? manifest.configKeys.length : 0,
+    reason: '',
+  };
+}
+
+/**
+ * One slug's transaction state, from evidence that has already been read.
+ *
+ * Pure: every input is a summary someone else read, and nothing here touches the filesystem. The
+ * ordering below is by how little can still be trusted, not by how likely each state is — the
+ * first state that fits is the answer, and every finding is kept alongside it so the parts that
+ * fit more than one state are not lost.
+ */
+export function diagnoseTransaction({ slug, root: root0, journal, staging, backup, live, official, lock, shared, dangling }) {
+  const findings = [];
+  const add = (code, detail) => findings.push({ code, detail });
+  const entries = (scan) => (scan && Array.isArray(scan.entries) ? scan.entries : []);
+  const dirs = (scan) => entries(scan).filter((entry) => entry.trusted === true).map((entry) => entry.name);
+  const suspicious = (scan) => entries(scan).filter((entry) => entry.kind !== 'dir' || entry.trusted !== true);
+  const record = journal && journal.record !== null && typeof journal.record === 'object' ? journal.record : null;
+  const phase = record !== null && typeof record.phase === 'string' ? record.phase : '';
+  const declaredTxid = record !== null && typeof record.txid === 'string' ? record.txid : '';
+  const stagingTxids = dirs(staging);
+  const backupTxids = dirs(backup);
+
+  if (journal && journal.present === true && journal.readable !== true) add('journal-unreadable', journal.reason || 'the journal could not be read');
+  if (journal && journal.unreadable) add('artifacts-unreadable', journal.unreadable);
+  if (staging && staging.unreadable) add('artifacts-unreadable', staging.unreadable);
+  if (backup && backup.unreadable) add('artifacts-unreadable', backup.unreadable);
+  for (const entry of suspicious(staging)) add('suspicious-artifact-name', 'staging entry ' + entry.name + ' is a ' + entry.kind + ', which no transaction of this plugin creates');
+  for (const entry of suspicious(backup)) add('suspicious-artifact-name', 'backup entry ' + entry.name + ' is a ' + entry.kind + ', which no transaction of this plugin creates');
+  if (stagingTxids.length > 0) add('staged-artifacts', stagingTxids.length + ' staged director' + (stagingTxids.length === 1 ? 'y' : 'ies'));
+  if (backupTxids.length > 0) add('backup-artifacts', backupTxids.length + ' backup director' + (backupTxids.length === 1 ? 'y' : 'ies'));
+  if (live && live.present === true && live.manifestOk !== true) add('live-manifest-unreadable', live.reason || 'the published manifest could not be read');
+  if (live && live.present === true && live.manifestOk === true && live.untagged === true) {
+    add('legacy-manifest', 'the published manifest has no transaction id, so ownership cannot be settled by it');
+  }
+  // During a staged run the published bundle is still the PREVIOUS one, so a different transaction
+  // id there is the expected shape of an update in progress. From BACKED_UP onwards the published
+  // directory is supposed to be this transaction's, and a different id is a real disagreement.
+  const liveShouldBeOurs = phase === 'BACKED_UP' || phase === 'PUBLISHED' || phase === 'APPLYING'
+    || phase === 'VERIFYING' || phase === 'NEEDS_ATTENTION';
+  const mismatch = live && live.present === true && live.manifestOk === true
+    && live.txid !== '' && declaredTxid !== '' && live.txid !== declaredTxid;
+  if (mismatch && liveShouldBeOurs) add('txid-mismatch', 'the journal describes ' + declaredTxid + ' and the published bundle claims ' + live.txid);
+  else if (mismatch) add('live-is-previous-version', 'the published bundle still claims ' + live.txid + ', which is the version this transaction is replacing');
+  if (live && live.present !== true) add('live-missing', 'the published directory does not exist');
+  if (lock && lock.state !== 'free') add('lock-held', 'a lock is present (' + lock.reason + ')');
+  if (official && official.readable !== true) add('profile-unreadable', official.reason || 'the profile state could not be read');
+  if (official && official.readable === true && official.installed !== true) add('not-installed-officially', 'the profile does not list this bundle as an installed dependency');
+  if (official && official.readable === true && official.rowLive !== true) add('row-not-live', 'no row in the running configuration matches this manifest');
+  if (shared && shared.ok !== true) add('shared-unknown', shared.reason || 'other profiles could not be ruled out');
+  if (shared && shared.ok === true && Array.isArray(shared.others) && shared.others.length > 0) {
+    add('shared-with-other-profiles', 'also read by: ' + shared.others.join(', '));
+  }
+  if (Array.isArray(dangling) && dangling.length > 0) {
+    add('dangling-link', 'a profile link points at nothing: ' + dangling.map((item) => item.profile).join(', '));
+  }
+
+  // The journal's declared paths are input, so they are checked before they mean anything.
+  let untrustedPaths = false;
+  if (record !== null) {
+    for (const field of ['staging', 'backup']) {
+      if (record[field] === undefined || record[field] === null || record[field] === '') continue;
+      const claim = trustPathClaim(root0, slug, record[field]);
+      if (claim.ok !== true) {
+        untrustedPaths = true;
+        add('untrusted-journal-path', 'the journal names a ' + field + ' path that is not inside this transaction\'s directory, so it is not used');
+      }
+    }
+    if (phase !== '' && !TX_PHASES.includes(phase)) add('unknown-phase', 'the journal names a phase this plugin does not define');
+  }
+
+  const ownership = {
+    declaredTxid,
+    liveTxid: live && typeof live.txid === 'string' ? live.txid : '',
+    liveBasis: live === undefined || live === null ? 'unknown'
+      : live.present !== true ? 'missing'
+        : live.manifestOk !== true ? 'unreadable'
+          : live.untagged === true ? 'manifest-missing-txid' : 'manifest-txid',
+    stagingTxids,
+    backupTxids,
+    note: 'directory names are claims made by whoever created them; only a manifest that carries a transaction id is evidence',
+  };
+
+  const readable = journal ? journal.readable === true : true;
+  const present = journal ? journal.present === true : false;
+  const stop = { state: 'txid-mismatch', reason: 'the journal and the published bundle disagree' };
+  let state;
+  if (official && official.readable !== true) state = 'profile-unreadable';
+  else if (present && !readable) state = 'journal-corrupt';
+  else if (record !== null && phase !== '' && !TX_PHASES.includes(phase)) state = untrustedPaths ? 'orphan-artifacts' : 'journal-corrupt';
+  else if (untrustedPaths) state = 'orphan-artifacts';
+  else if (lock && lock.state !== 'free') state = 'lock-blocked';
+  else if (record !== null && phase === 'NEEDS_ATTENTION') state = 'needs-attention';
+  else if (mismatch && liveShouldBeOurs) state = stop.state;
+  else if (record !== null && (phase === 'APPLYING' || phase === 'VERIFYING')) state = 'applying-unknown';
+  else if (record !== null && phase === 'BACKED_UP' && (live === undefined || live.present !== true)) state = 'backup-without-live';
+  else if (record !== null && phase === 'PUBLISHED') state = 'published-not-verified';
+  else if (record !== null && phase === 'STAGED') state = 'staged-only';
+  else if (record === null && (stagingTxids.length > 0 || backupTxids.length > 0)) state = 'orphan-artifacts';
+  else if (record !== null && (stagingTxids.some((name) => name !== declaredTxid) || backupTxids.some((name) => name !== declaredTxid))) state = 'orphan-artifacts';
+  else if (live && live.present === true && live.manifestOk === true && live.untagged === true && official && official.installed !== true) state = 'legacy-orphan';
+  else if (shared && shared.ok === true && Array.isArray(shared.others) && shared.others.length > 0) state = 'shared-live';
+  else state = 'clean';
+
+  const risk = state === 'orphan-artifacts' && (untrustedPaths || (record !== null && phase !== '' && !TX_PHASES.includes(phase)))
+    ? 'stop'
+    : RISK_BY_STATE[state];
+  return {
+    slug,
+    state,
+    risk,
+    phase,
+    txid: declaredTxid,
+    findings,
+    ownership,
+    artifacts: {
+      journal: journal && journal.present === true ? journalPathOf(root0, slug) : '',
+      staging: stagingTxids,
+      backup: backupTxids,
+      suspicious: suspicious(staging).concat(suspicious(backup)).map((entry) => entry.path),
+    },
+    official: official === undefined ? null : official,
+    lock: lock === undefined ? null : { state: lock.state, alive: lock.alive === true, txid: lock.txid || '', op: lock.op || '' },
+    shared: shared === undefined || shared.ok !== true ? null : { others: shared.others, current: shared.current || '' },
+    nextStep: NEXT_STEP_BY_STATE[state],
+  };
+}
+
+/** The journal's own path, as reported. Kept out of the classifier so it stays a pure function. */
+function journalPathOf(root, slug) {
+  return reportedPath(root, txPaths(root, slug).journal);
+}
+
+/** Read a slug's state and classify it. Every call below is a listing or a read. */
+export function diagnoseSlug(options) {
+  const { root, slug } = options;
+  const artifacts = readArtifacts(root, slug);
+  return diagnoseTransaction({ ...options, ...artifacts });
 }

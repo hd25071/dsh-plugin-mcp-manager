@@ -1883,9 +1883,14 @@ export function bundleDir(slug) {
   return join(MARKET_ROOT, slug);
 }
 
-/** Every installed market bundle, newest first. */
+/**
+ * Every installed market bundle, newest first.
+ *
+ * Read-only: an empty market root is an empty listing, not a reason to create one. Creating it here
+ * made every read of the listing a write, and a reader that writes cannot be asked what the state
+ * was before it looked.
+ */
 export function listInstalled() {
-  ensureRoot();
   const entries = [];
   let names = [];
   try {
@@ -1999,4 +2004,109 @@ export function removeBundleDir(slug) {
 /** The snapshot path, exposed for diagnostics. */
 export function cachePath() {
   return CACHE_PATH;
+}
+
+/**
+ * What the slug lock looks like right now. Read-only: a listing, a read and a signal probe.
+ *
+ * Naming the holder is the whole point. "Locked" and "locked by a process that no longer exists"
+ * lead to different decisions, and nothing here decides: a dead holder is reported as dead and the
+ * lock is left exactly where it is.
+ */
+export function lockStateFor(slug) {
+  const name = String(slug === undefined || slug === null ? '' : slug);
+  if (!SLUG_PATTERN.test(name)) {
+    return { state: 'unreadable', reason: 'the slug is not a slug, so no lock path may be built from it', alive: false, txid: '', op: '', path: '' };
+  }
+  const reported = '.locks/' + name + '.lock';
+  const path = lockPathFor(name);
+  try {
+    lstatSync(path);
+  } catch (error) {
+    if (error.code === 'ENOENT') return { state: 'free', reason: 'no lock is present', alive: false, txid: '', op: '', path: reported };
+    return { state: 'unreadable', reason: reported + ' could not be inspected (' + error.code + ')', alive: false, txid: '', op: '', path: reported };
+  }
+  const running = inFlightSlugs.get(name);
+  if (running !== undefined) {
+    return { state: 'held', reason: 'this process is running "' + running.op + '" on this slug', alive: true, txid: running.txid, op: running.op, path: reported };
+  }
+  const existing = describeLock(path);
+  if (existing.ok !== true) {
+    return { state: 'unreadable', reason: existing.reason, alive: false, txid: '', op: '', path: reported };
+  }
+  return {
+    state: 'held',
+    reason: '"' + String(existing.record.op) + '" holds this slug',
+    alive: existing.alive,
+    txid: typeof existing.record.txid === 'string' ? existing.record.txid : '',
+    op: typeof existing.record.op === 'string' ? existing.record.op : '',
+    path: reported,
+  };
+}
+
+/**
+ * Every slug that has transaction state on disk, whether or not a bundle is installed for it.
+ *
+ * Read-only. A slug whose published directory is gone still has to be reported, and it is exactly
+ * the one a listing driven by installed bundles would never mention.
+ */
+export function transactionSlugs() {
+  let names;
+  try {
+    names = readdirSync(join(MARKET_ROOT, '.tx'));
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const name of names.sort()) {
+    let info;
+    try {
+      info = lstatSync(join(MARKET_ROOT, '.tx', name));
+    } catch {
+      continue;
+    }
+    if (info.isDirectory() && !info.isSymbolicLink()) out.push(name);
+  }
+  return out;
+}
+
+/**
+ * Profile links that point at nothing. Read-only, and deliberately so.
+ *
+ * This used to run on the read path and remove what it found, which made opening the market a
+ * write. Finding is the part that belongs here; removing belongs to a request that says it is
+ * changing something.
+ */
+export function danglingBundleLinks() {
+  const out = [];
+  const profiles = join(homedir(), '.dsh', 'profiles');
+  let names;
+  try {
+    names = readdirSync(profiles);
+  } catch {
+    return out;
+  }
+  for (const profile of names.sort()) {
+    const scope = join(profiles, profile, 'node_modules', BUNDLE_SCOPE);
+    let entries;
+    try {
+      entries = readdirSync(scope);
+    } catch {
+      continue;
+    }
+    for (const name of entries.sort()) {
+      const link = join(scope, name);
+      let info;
+      try {
+        info = lstatSync(link);
+      } catch {
+        continue;
+      }
+      if (!info.isSymbolicLink()) continue;
+      // \`existsSync\` follows the link, so this is the question "is there anything behind it".
+      if (existsSync(link)) continue;
+      out.push({ profile, slug: name, scope: '.dsh/profiles/' + profile + '/node_modules/' + BUNDLE_SCOPE + '/' + name });
+    }
+  }
+  return out;
 }

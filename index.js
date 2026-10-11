@@ -1597,11 +1597,15 @@ function marketInstalledResponse(ctx) {
   const manifests = market.listInstalled();
   const state = market.catalog();
   const toolNames = toolNamesOf(ctx);
+  const manager = serviceOf(ctx, 'pluginManager');
   const items = manifests.map((manifest) => {
     const entry = state.servers.find((server) => server.name === manifest.registryName) || null;
     const live = stateOfRow(ctx, manifest, toolNames);
+    // The manifest also carries the values a person typed into the argument slots, and a listing
+    // is not a place to read them back out. Everything else is passed through unchanged.
+    const { argumentValues: _argumentValues, ...rest } = manifest;
     return {
-      ...manifest,
+      ...rest,
       state: live.state,
       error: live.error,
       toolCount: live.toolCount,
@@ -1612,19 +1616,96 @@ function marketInstalledResponse(ctx) {
     updateAvailable: manifest.source !== 'local' && entry !== null && entry.version !== '' && entry.version !== manifest.registryVersion,
     };
   });
-  // Opening the market is also the moment residue heals: a link left behind by any past
-  // uninstall is removed here, where nothing is mid-flight.
-  const pruned = market.pruneAllBundleLinks();
-  // A release that failed leaves a lock behind; this is the one place a person can see that without
-  // going to the filesystem. Nothing is cleaned up from a read path.
-  const lockProblems = market.lockDiagnostics();
   return json({
     ok: true,
     value: {
-      items, count: items.length, toolListing: toolNames !== null, prunedLinks: pruned,
-      ...(lockProblems.length === 0 ? {} : { lockDiagnostics: lockProblems }),
+      items,
+      count: items.length,
+      toolListing: toolNames !== null,
+      ...transactionReport(ctx, manager, manifests),
+      // A release that failed leaves a lock behind; this is the one place a person can see that
+      // without going to the filesystem. Nothing is cleaned up from a read path.
+      ...(market.lockDiagnostics().length === 0 ? {} : { lockDiagnostics: market.lockDiagnostics() }),
     },
   });
+}
+
+/**
+ * Every slug's transaction state, as a diagnosis the caller can act on by hand.
+ *
+ * Read-only by construction: each input below is a listing, a read or a signal probe, and the
+ * classifier itself touches nothing. This used to be the moment residue healed — the read path
+ * removed dangling links and wrote a report about it — which made opening the market a write and
+ * made the market's own view of a broken state depend on having already fixed it.
+ *
+ * @param ctx - the plugin context.
+ * @param manager - the plugin manager service, or undefined.
+ * @param manifests - the installed manifests.
+ * @returns \`{transactions, transactionSummary, danglingLinks}\`.
+ */
+function transactionReport(ctx, manager, manifests) {
+  const dangling = market.danglingBundleLinks();
+  const bySlug = new Map(manifests.map((manifest) => [manifest.slug, manifest]));
+  const slugs = new Set([...bySlug.keys(), ...market.transactionSlugs(), ...dangling.map((item) => item.slug)]);
+  const shared = new Map();
+  const transactions = [...slugs].sort().map((slug) => {
+    if (!shared.has(slug)) shared.set(slug, sharedReferenceSummary(ctx, slug));
+    return tx.diagnoseSlug({
+      root: market.MARKET_ROOT,
+      slug,
+      live: tx.readLiveBundle(market.bundleDir(slug)),
+      official: officialStateFor(ctx, manager, slug, bySlug.get(slug) || null),
+      lock: market.lockStateFor(slug),
+      shared: shared.get(slug),
+      dangling: dangling.filter((item) => item.slug === slug),
+    });
+  });
+  const count = (risk) => transactions.filter((entry) => entry.risk === risk).length;
+  return {
+    transactions,
+    transactionSummary: {
+      total: transactions.length,
+      safe: count('safe'),
+      manual: count('manual'),
+      stop: count('stop'),
+    },
+    danglingLinks: dangling,
+  };
+}
+
+/** What the official services say about one slug, or that they could not be read. */
+function officialStateFor(ctx, manager, slug, manifest) {
+  const rows = profileMcpRows(ctx);
+  let bundles = null;
+  try {
+    if (manager !== undefined && typeof manager.listBundles === 'function') {
+      const listed = manager.listBundles();
+      if (Array.isArray(listed)) bundles = listed;
+    }
+  } catch {
+    bundles = null;
+  }
+  if (rows === null || bundles === null) {
+    return { readable: false, reason: 'the profile cannot be read from here, so its state is unknown' };
+  }
+  const pkg = market.BUNDLE_PREFIX + slug;
+  const rowId = manifest === null ? '' : String(manifest.rowId || '');
+  return {
+    readable: true,
+    installed: bundles.some((item) => item !== null && typeof item === 'object' && item.name === pkg && item.installed === true),
+    rowLive: rowId === '' ? null : rows.some((row) => row.id === rowId),
+  };
+}
+
+/** Who else reads this bundle, or that the answer could not be established. */
+function sharedReferenceSummary(ctx, slug) {
+  const links = market.bundleReferences(slug, currentProfileOf(ctx));
+  if (links.ok !== true) return { ok: false, reason: 'the other profiles could not be read, so they cannot be ruled out' };
+  return {
+    ok: true,
+    others: links.references.filter((reference) => reference.current !== true).map((reference) => reference.profile),
+    current: links.references.filter((reference) => reference.current === true).map((reference) => reference.profile).join(','),
+  };
 }
 
 /**
