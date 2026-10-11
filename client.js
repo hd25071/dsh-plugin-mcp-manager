@@ -9,6 +9,192 @@
  * No build step, no import of any Harness Client package, styling through host theme
  * variables only — a DSH upgrade degrades the look rather than breaking the page.
  */
+// ── the two languages this panel speaks ─────────────────────────────────────────────────────────
+// Every string a person reads goes through `L`: unchanged in Chinese, looked up below otherwise.
+// A string with no entry stays Chinese rather than showing a key or nothing, and a string the code
+// compares rather than shows is deliberately absent from the table — translating one of those
+// would change what the code compares the moment the language changes.
+const MCPM_LOCALE_KEY = 'mcpm-locale';
+const EN = {
+    '当前 profile 里没有 @deepseek-ai/dsh-mcp-client 行。去左侧「MCP 市场」装一个，或装一个 MCP 组合包后回到这里刷新。': 'This profile has no @deepseek-ai/dsh-mcp-client row. Install one from MCP market on the left, or install dsh-plugin-mcp-manager itself.',
+    'MCP 调用记录': 'MCP call log',
+    '需要一个数字': 'a number is required',
+    'JSON 解析失败：': 'JSON did not parse: ',
+    ' 完成': ' done',
+    '保存': 'Save',
+    '(未命名)': '(unnamed)',
+    '停用': 'Off',
+    '启用': 'On',
+    '已覆盖 ': 'overridden ',
+    ' 项': ' items',
+    '这一行没有可读到的配置（只读来源）。': 'No readable configuration for this row (read-only source).',
+    '保存中…': 'Saving…',
+    '恢复默认': 'Restore defaults',
+    '收起原始数据': 'Hide raw data',
+    '原始数据': 'Raw data',
+    '没有可读的会话': 'no readable sessions',
+    '（没有会话）': '(no sessions)',
+    ' · 活动': ' · live',
+    '刷新': 'Refresh',
+    '读取中…': 'Loading…',
+    ' 次 MCP 调用': ' MCP calls',
+    '这个会话里没有 MCP 工具调用。': 'No MCP tool calls in this session.',
+    '失败': 'failed',
+    '成功': 'ok',
+    '未完成': 'unfinished',
+    '刚刚': 'just now',
+    ' 分钟前': 'm ago',
+    ' 小时前': 'h ago',
+    ' 天前': 'd ago',
+    '运行中': 'running',
+    '启动失败': 'start failed',
+    '未加载': 'not loaded',
+    '等待中': 'pending',
+    '加载中': 'loading',
+    '状态未知': 'unknown',
+    '安装': 'Install',
+    '安装 · 需密钥': 'Install · needs key',
+    '已安装 ✓': 'Installed ✓',
+    '更新 ↑': 'Update ↑',
+    '不可用': 'Unavailable',
+    '（无描述）': '(no description)',
+    '自建': 'Mine',
+    '本 Profile 未使用': 'not used by this profile',
+    '目录版本 v': 'catalog v',
+    '工具数未知': 'tool count unknown',
+    '⚠ 0 个工具': '⚠ 0 tools',
+    ' 个工具': ' tools',
+    '卸载中…': 'Removing…',
+    '删除本地文件': 'Delete local files',
+    '卸载': 'Uninstall',
+    '打开管理页失败：': 'could not open the manager page: ',
+    '」已安装（组合包 ': ' is installed (bundle ',
+    '）。改配置请到左侧「插件」→ dsh-plugin-mcp-manager 的 MCP 行。': '). To change its configuration open Plugins, then dsh-plugin-mcp-manager, then the MCP row.',
+    '其他 Profile 仍在使用': 'another profile still uses it',
+    '内容在安装后被改动过': 'the content changed after it was installed',
+    '已卸载并删除「': 'Uninstalled and deleted ',
+    '已卸载「': 'Uninstalled ',
+    '，并清理了 ': ', and cleaned up ',
+    ' 个残留链接': ' leftover links',
+    '（本地文件保留：': ' (files kept: ',
+    '搜索 MCP 服务器（名称 / 描述，本地搜索）': 'Search MCP servers (name / description, local index)',
+    '全部': 'All',
+    '本地': 'Local',
+    '远程': 'Remote',
+    '相关度': 'Relevance',
+    '最新上架': 'Newest',
+    '名称': 'Name',
+    '搜索中…': 'Searching…',
+    '搜索': 'Search',
+    '只拉取上次之后变更的条目，几秒钟': 'Pull only what changed since the last refresh (a few seconds)',
+    '刷新中…': 'Refreshing…',
+    '刷新目录': 'Refresh catalog',
+    '重新拉取全部 ': 'Re-pull all ',
+    ' 条，约需 2 分钟：': ' entries, about 2 minutes:',
+    '确认': 'Confirm',
+    '取消': 'Cancel',
+    '重新读取整个注册表，替换本地快照': 'Re-read the whole registry and replace the local snapshot',
+    '全量重拉': 'Full re-pull',
+    '目录：': 'Catalog: ',
+    ' 个服务器 · 更新于 ': ' servers · updated ',
+    '（已过期，建议刷新）': ' (stale, refresh suggested)',
+    '读取目录状态…': 'Reading catalog status…',
+    ' 可用': ' available',
+    ' 缺失': ' missing',
+    '还没有本地快照，点「刷新目录」拉一次全量（约 100 秒，之后都是本地搜索）。': 'No local snapshot yet. Press Refresh catalog to pull once (about 100s; every search after that runs locally).',
+    '正在后台全量重拉': 'Full re-pull running in the background',
+    '正在后台增量更新': 'Incremental refresh running in the background',
+    '正在后台拉取': 'Pulling in the background',
+    '：已 ': ': page ',
+    ' 页 / ': ' / ',
+    ' 条，': ' entries, ',
+    '变更 ': 'changed ',
+    ' 条': ' entries',
+    '保留 ': 'kept ',
+    ' 个服务器': ' servers',
+    '。目录尚不完整，装完即用的条目可能还没进来。': '. The catalog is still incomplete; entries that work out of the box may not have arrived yet.',
+    '上次刷新失败：': 'The last refresh failed: ',
+    '（继续使用本地快照）': ' (continuing with the local snapshot)',
+    '已安装（': 'Installed (',
+    '全部服务器': 'All servers',
+    '搜索结果': 'Search results',
+    '没有匹配的条目。': 'Nothing matched.',
+    '上一页': 'Previous',
+    '第 ': 'Page ',
+    ' 页 · 每页 ': ' · per page ',
+    '下一页': 'Next',
+    '<需要填写>': '<required>',
+    '已安装': 'Installed',
+    '覆盖更新': 'Reinstalled',
+    'MCP 行已写进新组合包 ': 'MCP row written into the new bundle ',
+    '，serverName 为 ': ', serverName is ',
+    '工具以 mcp__': 'Tools are exposed to the model as mcp__',
+    '__* 的名字提供给模型；改配置到左侧「插件」→ MCP 行。': '__*; to change the configuration open Plugins, then the MCP row.',
+    '关闭': 'Close',
+    '来源：自建（local-entries.json）': 'Source: mine (local-entries.json)',
+    '来源：官方 MCP 注册表': 'Source: the official MCP registry',
+    '读取安装方式…': 'Reading install options…',
+    '该条目覆盖了注册表中的同名条目': 'This entry overrides the registry entry of the same name',
+    '这个条目在这台机器上没有可用的安装方式：': 'No usable install option on this machine for this entry: ',
+    '安装方式': 'Install option',
+    '将替换已安装的注册表版本': 'This replaces the installed registry version',
+    '当前': 'Current',
+    '新装': 'New',
+    '📦 这是一个 mcpb 包，安装时将下载并解压到本地执行': '📦 This is an mcpb package; installing downloads and unpacks it locally',
+    '已读到包内 manifest 声明的配置字段，填好后再次点「安装」。': 'The configuration fields declared by the package manifest are loaded; fill them in and press Install again.',
+    '⚠️ 命令由包内 manifest 决定，安装后才能确定': '⚠️ The command is decided by the package manifest and is known only after installing',
+    '将连接到的地址': 'The address it will connect to',
+    '将执行的命令': 'The command it will run',
+    '⚠️ 密钥将以明文写入 profile 的 cordis.patch.yml。': '⚠️ Secrets are written in clear text into the profile cordis.patch.yml.',
+    '⚠️ 这条自建条目有可疑之处：': '⚠️ Something about this hand-written entry looks wrong: ',
+    '命令参数': 'Command arguments',
+    '必填': 'required',
+    '可留空': 'optional',
+    '需要填写': 'Fill in',
+    '配置（已有默认值，可改）': 'Configuration (defaults exist, editable)',
+    '已在 local-entries.json 中定义': 'defined in local-entries.json',
+    '这些值会写进 profile 的 cordis.patch.yml（明文）。': 'These values are written into the profile cordis.patch.yml (in clear text).',
+    '已配置 ': 'Configured: ',
+    '，留空则保留原值。': '; leave blank to keep the current value.',
+    '这个条目不需要填写任何配置。': 'This entry needs no configuration.',
+    '其它方式：': 'Other options: ',
+    '安装中…': 'Installing…',
+    '本部署没有右侧停靠栏，调用记录页打不开。': 'This deployment has no right dock, so the call log cannot open.',
+    '打开失败：': 'Could not open: ',
+    'MCP 管理器': 'MCP manager',
+    ' 条 MCP 行': ' MCP rows',
+    '（来源：': ' (source: ',
+    '调用记录': 'Call log',
+    '安装新的 MCP 服务器请到左侧导航的「MCP 市场」；这里管理已经装好的行。': 'To install a new MCP server open MCP market in the left navigation; this page manages the rows already installed.',
+    '改动写进当前 profile 的 cordis.patch.yml（由 DSH 的配置编辑服务落盘并热应用）；': 'Changes are written into the current profile cordis.patch.yml (persisted and hot-applied by the DSH configuration editor);',
+    '带 * 的字段表示这一行已在 profile 里覆盖过。': 'Fields marked * have already been overridden in the profile.',
+    '「恢复默认」会移除覆盖项、回到组合包声明的值。': 'Restore defaults removes the overrides and returns the values the bundle declares.',
+    '（注意：本 profile 未挂载 configEditor，只能读。）': '(note: this profile has no configEditor mounted; read-only.)',
+    '（有行缺少所属组合包信息，逐行配置页暂不可用。）': '(some rows lack their bundle information, so per-row configuration is unavailable.)',
+    'MCP 市场': 'MCP market',
+};
+const L = (text) => {
+  if (EN[text] === undefined) return text;
+  try {
+    return window.localStorage.getItem(MCPM_LOCALE_KEY) === 'en' ? EN[text] : text;
+  } catch {
+    return text;
+  }
+};
+const setLocale = (next) => {
+  try {
+    window.localStorage.setItem(MCPM_LOCALE_KEY, next === 'en' ? 'en' : 'zh');
+  } catch {
+    // A host without storage still switches for this session; it just forgets on reload.
+  }
+};
+const localeNow = () => {
+  try {
+    return window.localStorage.getItem(MCPM_LOCALE_KEY) === 'en' ? 'en' : 'zh';
+  } catch {
+    return 'zh';
+  }
+};
 window.__ModuleLoader__.load({
   id: 'dsh-plugin-mcp-manager',
   factory(require) {
@@ -26,7 +212,7 @@ window.__ModuleLoader__.load({
     const CALLS_KIND = 'mcp-manager-calls';
 
     /** Label of the call-log tab, in the tab strip and the tab-type menu. */
-    const CALLS_TITLE = 'MCP 调用记录';
+    const CALLS_TITLE = L('MCP 调用记录');
 
     // ------------------------------------------------------------------ transport
 
@@ -176,7 +362,7 @@ window.__ModuleLoader__.load({
     function parseValue(kind, text, previous) {
       if (kind === 'number') {
         const n = Number(text);
-        if (Number.isNaN(n)) throw new Error('需要一个数字');
+        if (Number.isNaN(n)) throw new Error(L('需要一个数字'));
         return n;
       }
       if (kind === 'boolean') return text === true || text === 'true';
@@ -184,7 +370,7 @@ window.__ModuleLoader__.load({
       try {
         return JSON.parse(text);
       } catch (error) {
-        throw new Error('JSON 解析失败：' + String((error && error.message) || error));
+        throw new Error(L('JSON 解析失败：') + String((error && error.message) || error));
       }
     }
 
@@ -247,7 +433,7 @@ window.__ModuleLoader__.load({
         setBusy(label); setError(''); setNote('');
         try {
           await action();
-          setNote(label + ' 完成');
+          setNote(label + L(' 完成'));
           if (onReload) await onReload();
         } catch (e) {
           setError(String((e && e.message) || e));
@@ -269,18 +455,18 @@ window.__ModuleLoader__.load({
 
       return h('div', { style: S.card },
         h('div', { style: S.rowTop },
-          h('span', { style: S.name }, serverNameOf(row.effective, row.id || '(未命名)')),
+          h('span', { style: S.name }, serverNameOf(row.effective, row.id || L('(未命名)'))),
           h('span', { style: { ...S.tag, ...S.muted } }, (row.effective && row.effective.transport) || 'transport?'),
-          h('span', { style: { ...S.tag, ...(disabled ? S.muted : {}) } }, disabled ? '停用' : '启用'),
+          h('span', { style: { ...S.tag, ...(disabled ? S.muted : {}) } }, disabled ? L('停用') : L('启用')),
           overriddenKeys.length > 0
-            ? h('span', { style: S.tag }, '已覆盖 ' + overriddenKeys.length + ' 项') : null,
+            ? h('span', { style: S.tag }, L('已覆盖 ') + overriddenKeys.length + L(' 项')) : null,
         ),
         h('div', { style: { ...S.mono, ...S.muted, marginTop: 4 } },
           row.bundle ? row.bundle + '#' + row.rowId + '   ' : (row.id ? 'id: ' + row.id + '   ' : ''),
           targetOf(row.effective) ? '→  ' + targetOf(row.effective) : ''),
 
         fields.length === 0
-          ? h('div', { style: { ...S.muted, marginTop: 8 } }, '这一行没有可读到的配置（只读来源）。')
+          ? h('div', { style: { ...S.muted, marginTop: 8 } }, L('这一行没有可读到的配置（只读来源）。'))
           : h('div', { style: { marginTop: 6 } },
               fields.map((key) => {
                 const kind = kindOf((row.effective || {})[key]);
@@ -322,18 +508,18 @@ window.__ModuleLoader__.load({
             style: S.btnPrimary,
             disabled: row.editable === false || busy !== '',
             onClick: submit,
-          }, busy === '保存' ? '保存中…' : '保存'),
+          }, busy === '保存' ? L('保存中…') : '保存'),
           h('button', {
             style: S.btn,
             disabled: row.editable === false || busy !== '',
-            onClick: () => run('恢复默认', () => resetConfig(row.id)),
-          }, '恢复默认'),
+            onClick: () => run(L('恢复默认'), () => resetConfig(row.id)),
+          }, L('恢复默认')),
           h('button', {
             style: S.btn,
             disabled: row.editable === false || busy !== '',
-            onClick: () => run(disabled ? '启用' : '停用', () => setEnabled(row.id, disabled)),
-          }, disabled ? '启用' : '停用'),
-          h('button', { style: S.btn, onClick: () => setOpen(!open) }, open ? '收起原始数据' : '原始数据'),
+            onClick: () => run(disabled ? L('启用') : L('停用'), () => setEnabled(row.id, disabled)),
+          }, disabled ? L('启用') : L('停用')),
+          h('button', { style: S.btn, onClick: () => setOpen(!open) }, open ? L('收起原始数据') : L('原始数据')),
         ),
 
         note ? h('div', { style: { ...S.muted, ...S.ok } }, note) : null,
@@ -381,7 +567,7 @@ window.__ModuleLoader__.load({
           const first = (list[0] && list[0].id) || '';
           setSessionId(first);
           if (first) await loadCalls(first);
-          else setState({ status: 'ready', calls: [], total: 0, error: '没有可读的会话' });
+          else setState({ status: 'ready', calls: [], total: 0, error: L('没有可读的会话') });
         } catch (e) {
           setState({ status: 'ready', calls: [], total: 0, error: String((e && e.message) || e) });
         }
@@ -401,21 +587,21 @@ window.__ModuleLoader__.load({
             value: sessionId,
             onChange: (e) => pick(e.target.value),
           }, sessions.length === 0
-            ? h('option', { value: '' }, '（没有会话）')
+            ? h('option', { value: '' }, L('（没有会话）'))
             : sessions.map((s) => h('option', { key: s.id, value: s.id },
                 (s.title ? String(s.title).slice(0, 60) + ' · ' : '') +
-                s.id.slice(0, 8) + (s.live ? ' · 活动' : '')))),
-          h('button', { style: S.btn, onClick: () => loadCalls(sessionId) }, '刷新'),
+                s.id.slice(0, 8) + (s.live ? L(' · 活动') : '')))),
+          h('button', { style: S.btn, onClick: () => loadCalls(sessionId) }, L('刷新')),
         ),
 
         state.error ? h('div', { style: S.err }, state.error) : null,
-        state.status === 'loading' ? h('div', { style: S.muted }, '读取中…') : null,
+        state.status === 'loading' ? h('div', { style: S.muted }, L('读取中…')) : null,
         state.status === 'ready' && !state.error
           ? h('div', { style: { ...S.muted, marginBottom: 6 } },
-              state.calls.length + ' / ' + state.total + ' 次 MCP 调用')
+              state.calls.length + ' / ' + state.total + L(' 次 MCP 调用'))
           : null,
         state.status === 'ready' && !state.error && state.calls.length === 0
-          ? h('div', { style: S.muted }, '这个会话里没有 MCP 工具调用。')
+          ? h('div', { style: S.muted }, L('这个会话里没有 MCP 工具调用。'))
           : null,
 
         state.calls.map((call, index) => {
@@ -430,7 +616,7 @@ window.__ModuleLoader__.load({
               h('span', { style: { ...S.mono, fontWeight: 600 } }, call.tool || '?'),
               h('span', { style: { ...S.tag, ...S.muted } }, call.server || '—'),
               h('span', { style: { ...S.tag, ...(call.ok === false ? S.err : S.muted) } },
-                call.ok === false ? '失败' : (call.ok === true ? '成功' : '未完成')),
+                call.ok === false ? L('失败') : (call.ok === true ? L('成功') : L('未完成'))),
               h('span', { style: { ...S.muted, ...S.mono } },
                 ms(call.durationMs) + ' · ' + bytes(call.resultBytes)),
             ),
@@ -643,23 +829,23 @@ window.__ModuleLoader__.load({
     function ageText(ms) {
       if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '';
       const minutes = Math.floor(ms / 60000);
-      if (minutes < 1) return '刚刚';
-      if (minutes < 60) return minutes + ' 分钟前';
+      if (minutes < 1) return L('刚刚');
+      if (minutes < 60) return minutes + L(' 分钟前');
       const hours = Math.floor(minutes / 60);
-      if (hours < 24) return hours + ' 小时前';
-      return Math.floor(hours / 24) + ' 天前';
+      if (hours < 24) return hours + L(' 小时前');
+      return Math.floor(hours / 24) + L(' 天前');
     }
 
     /** How a generated row's live state reads on screen. */
     const STATE_LABEL = {
-      active: '运行中',
-      failed: '启动失败',
-      absent: '未加载',
-      'not-loaded': '未加载',
-      pending: '等待中',
-      loading: '加载中',
-      unknown: '状态未知',
-      'no-loader': '状态未知',
+      active: L('运行中'),
+      failed: L('启动失败'),
+      absent: L('未加载'),
+      'not-loaded': L('未加载'),
+      pending: L('等待中'),
+      loading: L('加载中'),
+      unknown: L('状态未知'),
+      'no-loader': L('状态未知'),
     };
 
     /** Inject the class table once per document, and hand back the disposer. */
@@ -735,11 +921,11 @@ window.__ModuleLoader__.load({
 
     /** The label that belongs to one card state. */
     const CARD_ACTION = {
-      idle: '安装',
-      'needs-config': '安装 · 需密钥',
-      installed: '已安装 ✓',
-      update: '更新 ↑',
-      unavailable: '不可用',
+      idle: L('安装'),
+      'needs-config': L('安装 · 需密钥'),
+      installed: L('已安装 ✓'),
+      update: L('更新 ↑'),
+      unavailable: L('不可用'),
     };
 
     /**
@@ -793,17 +979,17 @@ window.__ModuleLoader__.load({
           h('div', { className: avatarClassOf(card.name), 'aria-hidden': 'true' }, avatarLetterOf(card.title || card.name)),
           h('h3', { className: 'mcpm-card__name' }, card.title || card.name),
         ),
-        h('p', { className: 'mcpm-card__desc' }, card.description || '（无描述）'),
+        h('p', { className: 'mcpm-card__desc' }, card.description || L('（无描述）')),
         h('div', { className: 'mcpm-card__badges' },
           badgeItems([
-            card.source === 'local' ? h('span', { key: 'own', className: 'mcpm-badge mcpm-badge--own' }, '自建') : null,
+            card.source === 'local' ? h('span', { key: 'own', className: 'mcpm-badge mcpm-badge--own' }, L('自建')) : null,
             // For a local entry the provenance badge already says 自建, so this one shows the
             // install form instead of repeating 'local'.
             h('span', { key: 'kind', className: 'mcpm-badge mcpm-badge--kind' },
               card.source === 'local' ? (card.planKind || 'local') : (card.registryType || (card.hasRemote ? 'remote' : '—'))),
             ...(card.kinds || []).map((kind) => h('span', { key: kind, className: 'mcpm-badge mcpm-badge--transport' }, transportLabelOf(kind))),
             // The button already says 已安装 ✓, so a 已装 badge would only repeat it.
-            state === 'unavailable' ? h('span', { key: 'unavailable', className: 'mcpm-badge mcpm-badge--unavailable' }, '不可用') : null,
+            state === 'unavailable' ? h('span', { key: 'unavailable', className: 'mcpm-badge mcpm-badge--unavailable' }, L('不可用')) : null,
             // Version is reference information, so it renders last.
             card.version ? h('span', { key: 'version', className: 'mcpm-badge mcpm-badge--version' }, 'v' + card.version) : null,
           ]),
@@ -838,20 +1024,20 @@ window.__ModuleLoader__.load({
             h('span', { key: 'state', className: 'mcpm-badge mcpm-badge--state' }, STATE_LABEL[item.state] || item.state),
             // A detached bundle is not an installed one, even though its files are still here.
             item.inUse === false
-              ? h('span', { key: 'inuse', className: 'mcpm-badge' }, '本 Profile 未使用')
+              ? h('span', { key: 'inuse', className: 'mcpm-badge' }, L('本 Profile 未使用'))
               : null,
             item.updateAvailable
-              ? h('span', { key: 'update', className: 'mcpm-badge mcpm-badge--update' }, '目录版本 v' + item.latestVersion)
+              ? h('span', { key: 'update', className: 'mcpm-badge mcpm-badge--update' }, L('目录版本 v') + item.latestVersion)
               : null,
             // Zero tools is not "nothing to say": a row that connects and registers nothing is
             // exactly the silent failure this badge exists to expose.
             item.toolCount === null || item.toolCount === undefined
               ? (item.toolState === 'unknown'
-                  ? h('span', { key: 'tools', className: 'mcpm-badge' }, '工具数未知')
+                  ? h('span', { key: 'tools', className: 'mcpm-badge' }, L('工具数未知'))
                   : null)
               : (item.toolCount === 0
-                  ? h('span', { key: 'tools', className: 'mcpm-badge mcpm-badge--tools-warn' }, '⚠ 0 个工具')
-                  : h('span', { key: 'tools', className: 'mcpm-badge mcpm-badge--tools' }, '✓ ' + item.toolCount + ' 个工具')),
+                  ? h('span', { key: 'tools', className: 'mcpm-badge mcpm-badge--tools-warn' }, L('⚠ 0 个工具'))
+                  : h('span', { key: 'tools', className: 'mcpm-badge mcpm-badge--tools' }, '✓ ' + item.toolCount + L(' 个工具'))),
           ]),
         ),
         h('div', { className: 'mcpm-card__actions' },
@@ -861,7 +1047,7 @@ window.__ModuleLoader__.load({
             'data-state': 'installed',
             disabled: busy === item.slug,
             onClick: () => onUninstall(item),
-          }, busy === item.slug ? '卸载中…' : (item.inUse === false ? '删除本地文件' : '卸载')),
+          }, busy === item.slug ? L('卸载中…') : (item.inUse === false ? L('删除本地文件') : L('卸载'))),
         ),
         item.error ? h('p', { className: 'mcpm-error' }, item.error) : null,
       );
@@ -965,11 +1151,11 @@ window.__ModuleLoader__.load({
             setHint('');
             return;
           } catch (error) {
-            setHint('打开管理页失败：' + String((error && error.message) || error));
+            setHint(L('打开管理页失败：') + String((error && error.message) || error));
             return;
           }
         }
-        setHint('「' + (hit.title || hit.name) + '」已安装（组合包 ' + pkg + '）。改配置请到左侧「插件」→ dsh-plugin-mcp-manager 的 MCP 行。');
+        setHint('「' + (hit.title || hit.name) + L('」已安装（组合包 ') + pkg + L('）。改配置请到左侧「插件」→ dsh-plugin-mcp-manager 的 MCP 行。'));
       };
 
       const uninstall = async (item) => {
@@ -984,12 +1170,12 @@ window.__ModuleLoader__.load({
           const pruned = (done && done.pruned) || [];
           // Say what happened to the files, not just that the profile let go: a removal that kept
           // them has a reason, and that reason is the only useful part of the answer.
-          const why = done && done.retireReason === 'retire-shared' ? '其他 Profile 仍在使用'
-            : done && done.retireReason === 'retire-content-changed' ? '内容在安装后被改动过'
+          const why = done && done.retireReason === 'retire-shared' ? L('其他 Profile 仍在使用')
+            : done && done.retireReason === 'retire-content-changed' ? L('内容在安装后被改动过')
             : done && done.retireReason ? String(done.retireDetail || done.retireReason) : '';
-          setHint((done && done.retired === true ? '已卸载并删除「' : '已卸载「') + (item.registryTitle || item.registryName) + '」'
-            + (pruned.length > 0 ? '，并清理了 ' + pruned.length + ' 个残留链接' : '')
-          + (done && done.retired !== true && why !== '' ? '（本地文件保留：' + why + '）' : ''));
+          setHint((done && done.retired === true ? L('已卸载并删除「') : L('已卸载「')) + (item.registryTitle || item.registryName) + '」'
+            + (pruned.length > 0 ? L('，并清理了 ') + pruned.length + L(' 个残留链接') : '')
+          + (done && done.retired !== true && why !== '' ? L('（本地文件保留：') + why + '）' : ''));
         } catch (e) {
           setError(String((e && e.message) || e));
         } finally {
@@ -1004,18 +1190,26 @@ window.__ModuleLoader__.load({
         ? [['npx', status.runtimes.npx.available], ['uvx', status.runtimes.uvx.available], ['docker', status.runtimes.docker.available]]
         : [];
 
+      const [, setLocaleTick] = React.useState(0);
       return h('div', { className: 'mcpm-page' },
         h('div', { className: 'mcpm-toolbar' },
+          h('button', {
+            key: 'locale',
+            type: 'button',
+            className: 'mcpm-btn mcpm-btn--locale',
+            title: '切换界面语言 / Switch language',
+            onClick: () => { setLocale(localeNow() === 'en' ? 'zh' : 'en'); setLocaleTick((tick) => tick + 1); },
+          }, localeNow() === 'en' ? '中文' : 'EN'),
           h('input', {
             className: 'mcpm-search',
-            placeholder: '搜索 MCP 服务器（名称 / 描述，本地搜索）',
+            placeholder: L('搜索 MCP 服务器（名称 / 描述，本地搜索）'),
             value: query,
             onChange: (event) => setQuery(event.target.value),
             onKeyDown: (event) => { if (event.key === 'Enter') apply(kind, sort, 0, source); },
           }),
           h('div', { className: 'mcpm-filters' },
             // One dimension, four chips: 本地/远程 are the install form, 自建 is provenance.
-            [['all', '全部', 'all'], ['local', '本地', 'all'], ['remote', '远程', 'all'], ['own', '自建', 'local']].map(([value, label, src]) =>
+            [['all', L('全部'), 'all'], ['local', L('本地'), 'all'], ['remote', L('远程'), 'all'], ['own', L('自建'), 'local']].map(([value, label, src]) =>
               h('button', {
                 key: value,
                 type: 'button',
@@ -1029,32 +1223,32 @@ window.__ModuleLoader__.load({
             value: sort,
             onChange: (event) => apply(kind, event.target.value, 0, source),
           },
-            h('option', { value: 'relevance' }, '相关度'),
-            h('option', { value: 'newest' }, '最新上架'),
-            h('option', { value: 'name' }, '名称'),
+            h('option', { value: 'relevance' }, L('相关度')),
+            h('option', { value: 'newest' }, L('最新上架')),
+            h('option', { value: 'name' }, L('名称')),
           ),
           h('button', { type: 'button', className: 'mcpm-btn mcpm-btn--search', 'data-state': 'idle', onClick: () => apply(kind, sort, 0, source) },
-            busy === 'search' ? '搜索中…' : '搜索'),
-          h('button', { type: 'button', className: 'mcpm-btn', 'data-state': refreshing ? 'busy' : 'idle', disabled: refreshing, onClick: () => refresh('incremental'), title: '只拉取上次之后变更的条目，几秒钟' },
-            refreshing ? '刷新中…' : '刷新目录'),
+            busy === 'search' ? L('搜索中…') : L('搜索')),
+          h('button', { type: 'button', className: 'mcpm-btn', 'data-state': refreshing ? 'busy' : 'idle', disabled: refreshing, onClick: () => refresh('incremental'), title: L('只拉取上次之后变更的条目，几秒钟') },
+            refreshing ? L('刷新中…') : L('刷新目录')),
           // A full re-pull is a different question ("is my snapshot still correct") and
           // costs minutes, so it is a secondary action behind a confirmation.
           confirmFull
-            ? h('span', { className: 'mcpm-note' }, '重新拉取全部 ' + (status ? status.count : 0) + ' 条，约需 2 分钟：',
-              h('button', { type: 'button', className: 'mcpm-btn', 'data-state': 'idle', disabled: refreshing, onClick: () => { setConfirmFull(false); refresh('full'); } }, '确认'),
-              h('button', { type: 'button', className: 'mcpm-btn', onClick: () => setConfirmFull(false) }, '取消'))
-            : h('button', { type: 'button', className: 'mcpm-btn', disabled: refreshing, onClick: () => setConfirmFull(true), title: '重新读取整个注册表，替换本地快照' }, '全量重拉'),
+            ? h('span', { className: 'mcpm-note' }, L('重新拉取全部 ') + (status ? status.count : 0) + L(' 条，约需 2 分钟：'),
+              h('button', { type: 'button', className: 'mcpm-btn', 'data-state': 'idle', disabled: refreshing, onClick: () => { setConfirmFull(false); refresh('full'); } }, L('确认')),
+              h('button', { type: 'button', className: 'mcpm-btn', onClick: () => setConfirmFull(false) }, L('取消')))
+            : h('button', { type: 'button', className: 'mcpm-btn', disabled: refreshing, onClick: () => setConfirmFull(true), title: L('重新读取整个注册表，替换本地快照') }, L('全量重拉')),
         ),
 
         h('div', { className: 'mcpm-statusline' },
           status
-            ? '目录：' + status.count + ' 个服务器 · 更新于 ' + ageText(status.ageMs) + (status.stale ? '（已过期，建议刷新）' : '') + ' · '
-            : '读取目录状态…',
+            ? L('目录：') + status.count + L(' 个服务器 · 更新于 ') + ageText(status.ageMs) + (status.stale ? L('（已过期，建议刷新）') : '') + ' · '
+            : L('读取目录状态…'),
           runtimeBits.map(([name, available]) =>
-            h('span', { key: name, 'data-ok': available ? 'yes' : 'no' }, name + (available ? ' 可用' : ' 缺失') + '  ')),
+            h('span', { key: name, 'data-ok': available ? 'yes' : 'no' }, name + (available ? L(' 可用') : L(' 缺失')) + '  ')),
         ),
         status && status.source === 'none'
-          ? h('div', { className: 'mcpm-statusline' }, '还没有本地快照，点「刷新目录」拉一次全量（约 100 秒，之后都是本地搜索）。')
+          ? h('div', { className: 'mcpm-statusline' }, L('还没有本地快照，点「刷新目录」拉一次全量（约 100 秒，之后都是本地搜索）。'))
           : null,
         refreshing
           ? h('div', { className: 'mcpm-statusline mcpm-statusline--progress' },
@@ -1062,17 +1256,17 @@ window.__ModuleLoader__.load({
             // reports nothing, and naming a mode then would be a lie in the one line the
             // user reads to decide whether the catalog is complete. Version skew is real:
             // the browser bundle hot-replaces while the host keeps running the old code.
-            (status.refreshing.mode === 'full' ? '正在后台全量重拉'
-              : status.refreshing.mode === 'incremental' ? '正在后台增量更新'
-                : '正在后台拉取')
-            + '：已 ' + status.refreshing.pages + ' 页 / ' + status.refreshing.rawEntries + ' 条，'
+            (status.refreshing.mode === 'full' ? L('正在后台全量重拉')
+              : status.refreshing.mode === 'incremental' ? L('正在后台增量更新')
+                : L('正在后台拉取'))
+            + L('：已 ') + status.refreshing.pages + L(' 页 / ') + status.refreshing.rawEntries + L(' 条，')
             + (status.refreshing.mode === 'incremental'
-              ? '变更 ' + status.refreshing.kept + ' 条'
-              : '保留 ' + status.refreshing.kept + ' 个服务器')
-            + '。目录尚不完整，装完即用的条目可能还没进来。')
+              ? L('变更 ') + status.refreshing.kept + L(' 条')
+              : L('保留 ') + status.refreshing.kept + L(' 个服务器'))
+            + L('。目录尚不完整，装完即用的条目可能还没进来。'))
           : null,
         status && status.refreshing && status.refreshing.error
-          ? h('div', { className: 'mcpm-error' }, '上次刷新失败：' + status.refreshing.error + '（继续使用本地快照）')
+          ? h('div', { className: 'mcpm-error' }, L('上次刷新失败：') + status.refreshing.error + L('（继续使用本地快照）'))
           : null,
 
         error ? h('div', { className: 'mcpm-error' }, error) : null,
@@ -1088,7 +1282,7 @@ window.__ModuleLoader__.load({
 
         installed.items.length > 0
           ? h('section', { className: 'mcpm-section' },
-              h('h2', { className: 'mcpm-result-title' }, '已安装（' + installed.items.length + '）'),
+              h('h2', { className: 'mcpm-result-title' }, L('已安装（') + installed.items.length + '）'),
               h('div', { className: 'mcpm-grid' },
                 installed.items.map((item) => h(InstalledCard, { key: item.slug, item, busy, onUninstall: uninstall })),
               ),
@@ -1098,9 +1292,9 @@ window.__ModuleLoader__.load({
         h('section', { className: 'mcpm-section' },
           // Auxiliary information, so it stays smaller than the card names it labels.
           h('h2', { className: 'mcpm-result-title' },
-            (query.trim() === '' ? '全部服务器' : '搜索结果') + '（' + results.total + '）'),
+            (query.trim() === '' ? L('全部服务器') : L('搜索结果')) + '（' + results.total + '）'),
           results.results.length === 0
-            ? h('p', { className: 'mcpm-empty' }, '没有匹配的条目。')
+            ? h('p', { className: 'mcpm-empty' }, L('没有匹配的条目。'))
             : h('div', { className: 'mcpm-grid' },
                 results.results.map((card) => h(MarketCard, {
                   key: card.name,
@@ -1113,9 +1307,9 @@ window.__ModuleLoader__.load({
         ),
 
         h('div', { className: 'mcpm-pager' },
-          h('button', { type: 'button', className: 'mcpm-btn', 'data-state': page === 0 ? 'unavailable' : 'idle', disabled: page === 0, onClick: () => apply(kind, sort, page - 1) }, '上一页'),
-          h('span', { className: 'mcpm-note' }, '第 ' + (page + 1) + ' / ' + pageCount + ' 页 · 每页 ' + MARKET_PAGE_SIZE),
-          h('button', { type: 'button', className: 'mcpm-btn', 'data-state': page + 1 >= pageCount ? 'unavailable' : 'idle', disabled: page + 1 >= pageCount, onClick: () => apply(kind, sort, page + 1) }, '下一页'),
+          h('button', { type: 'button', className: 'mcpm-btn', 'data-state': page === 0 ? 'unavailable' : 'idle', disabled: page === 0, onClick: () => apply(kind, sort, page - 1) }, L('上一页')),
+          h('span', { className: 'mcpm-note' }, L('第 ') + (page + 1) + ' / ' + pageCount + L(' 页 · 每页 ') + MARKET_PAGE_SIZE),
+          h('button', { type: 'button', className: 'mcpm-btn', 'data-state': page + 1 >= pageCount ? 'unavailable' : 'idle', disabled: page + 1 >= pageCount, onClick: () => apply(kind, sort, page + 1) }, L('下一页')),
         ),
       );
     }
@@ -1132,7 +1326,7 @@ window.__ModuleLoader__.load({
         }
         const value = (argumentValues || {})[entry.name];
         parts.push(entry.name);
-        parts.push(typeof value === 'string' && value !== '' ? value : '<需要填写>');
+        parts.push(typeof value === 'string' && value !== '' ? value : L('<需要填写>'));
       }
       return parts;
     }
@@ -1219,16 +1413,16 @@ window.__ModuleLoader__.load({
       if (result !== null) {
         return h('div', { className: 'mcpm-dialog', 'data-state': 'installed' },
           h('div', { className: 'mcpm-card__badges' },
-            h('span', { className: 'mcpm-badge mcpm-badge--installed' }, '已安装'),
+            h('span', { className: 'mcpm-badge mcpm-badge--installed' }, L('已安装')),
             h('span', { className: 'mcpm-badge' }, result.pkg),
-            result.reinstalled ? h('span', { className: 'mcpm-badge' }, '覆盖更新') : null,
+            result.reinstalled ? h('span', { className: 'mcpm-badge' }, L('覆盖更新')) : null,
           ),
           h('p', { className: 'mcpm-note' },
-            'MCP 行已写进新组合包 ' + result.dir + '，serverName 为 ' + result.serverName + '。'),
+            L('MCP 行已写进新组合包 ') + result.dir + L('，serverName 为 ') + result.serverName + '。'),
           h('p', { className: 'mcpm-note' },
-            '工具以 mcp__' + result.serverName + '__* 的名字提供给模型；改配置到左侧「插件」→ MCP 行。'),
+            L('工具以 mcp__') + result.serverName + L('__* 的名字提供给模型；改配置到左侧「插件」→ MCP 行。')),
           h('div', { className: 'mcpm-actions' },
-            h('button', { type: 'button', className: 'mcpm-btn mcpm-btn--primary', 'data-state': 'idle', onClick: onClose }, '关闭'),
+            h('button', { type: 'button', className: 'mcpm-btn mcpm-btn--primary', 'data-state': 'idle', onClick: onClose }, L('关闭')),
           ),
         );
       }
@@ -1239,27 +1433,27 @@ window.__ModuleLoader__.load({
           h('span', { className: 'mcpm-badge' }, name),
           detail && detail.server.version ? h('span', { className: 'mcpm-badge' }, 'v' + detail.server.version) : null,
           h('span', { className: 'mcpm-badge mcpm-badge--source' },
-            detail && detail.source === 'local' ? '来源：自建（local-entries.json）' : '来源：官方 MCP 注册表'),
+            detail && detail.source === 'local' ? L('来源：自建（local-entries.json）') : L('来源：官方 MCP 注册表')),
         ),
         detail && detail.server.description ? h('p', { className: 'mcpm-note' }, detail.server.description) : null,
-        !detail && !error ? h('p', { className: 'mcpm-note' }, '读取安装方式…') : null,
+        !detail && !error ? h('p', { className: 'mcpm-note' }, L('读取安装方式…')) : null,
         error ? h('div', { className: 'mcpm-error' }, error) : null,
 
         // A local entry of the same name covers the registry one: say so before anything is
         // written, because the row that comes out is not the row the registry describes.
         detail && detail.coversRegistry
-          ? h('div', { className: 'mcpm-note' }, '该条目覆盖了注册表中的同名条目'
+          ? h('div', { className: 'mcpm-note' }, L('该条目覆盖了注册表中的同名条目')
             + (detail.coversVersion ? '（v' + detail.coversVersion + '）' : '') + '。')
           : null,
 
         detail && detail.options.length === 0
-          ? h('div', { className: 'mcpm-error' }, '这个条目在这台机器上没有可用的安装方式：' +
+          ? h('div', { className: 'mcpm-error' }, L('这个条目在这台机器上没有可用的安装方式：') +
               (detail.blocked || []).map((item) => item.registryType + '（' + item.reason + '）').join('；'))
           : null,
 
         detail && detail.options.length > 1
           ? h('div', null,
-              h('div', { className: 'mcpm-note' }, '安装方式'),
+              h('div', { className: 'mcpm-note' }, L('安装方式')),
               detail.options.map((item, index) => h('label', { key: item.label, className: 'mcpm-field' },
                 h('input', { type: 'radio', checked: index === optionIndex, onChange: () => setOptionIndex(index) }),
                 h('span', null, item.label),
@@ -1271,26 +1465,26 @@ window.__ModuleLoader__.load({
         // side by side and stands in for the plain block below it.
         isReplacing(detail, option, argValues)
           ? h('div', { className: 'mcpm-dialog mcpm-dialog--replace' },
-              h('div', { className: 'mcpm-note' }, '将替换已安装的注册表版本'),
+              h('div', { className: 'mcpm-note' }, L('将替换已安装的注册表版本')),
               h('div', { className: 'mcpm-field' },
-                h('span', { className: 'mcpm-field__label' }, '当前'),
+                h('span', { className: 'mcpm-field__label' }, L('当前')),
                 h('pre', { className: 'mcpm-pre' }, installedLineOf(detail))),
               h('div', { className: 'mcpm-field' },
-                h('span', { className: 'mcpm-field__label' }, '新装'),
+                h('span', { className: 'mcpm-field__label' }, L('新装')),
                 h('pre', { className: 'mcpm-pre' }, commandLineOf(option, argValues))),
             )
           : option && option.registryType === 'mcpb'
             // An mcpb package carries its command line inside its manifest, so there is nothing
             // to show yet — saying so is more honest than an empty command block.
             ? h('div', null,
-                h('div', { className: 'mcpm-note' }, '📦 这是一个 mcpb 包，安装时将下载并解压到本地执行'),
+                h('div', { className: 'mcpm-note' }, L('📦 这是一个 mcpb 包，安装时将下载并解压到本地执行')),
                 h('div', { className: 'mcpm-note' }, discovered
-                  ? '已读到包内 manifest 声明的配置字段，填好后再次点「安装」。'
-                  : '⚠️ 命令由包内 manifest 决定，安装后才能确定'),
+                  ? L('已读到包内 manifest 声明的配置字段，填好后再次点「安装」。')
+                  : L('⚠️ 命令由包内 manifest 决定，安装后才能确定')),
               )
             : option
               ? h('div', null,
-                  h('div', { className: 'mcpm-note' }, option.kind === 'http' ? '将连接到的地址' : '将执行的命令'),
+                  h('div', { className: 'mcpm-note' }, option.kind === 'http' ? L('将连接到的地址') : L('将执行的命令')),
                   h('pre', { className: 'mcpm-pre' }, commandLineOf(option, argValues)),
                 )
               : null,
@@ -1301,11 +1495,11 @@ window.__ModuleLoader__.load({
         option
           ? h('div', null,
               (option.variables || []).some((variable) => variable.isSecret && variable.default !== '')
-                ? h('div', { className: 'mcpm-error' }, '⚠️ 密钥将以明文写入 profile 的 cordis.patch.yml。')
+                ? h('div', { className: 'mcpm-error' }, L('⚠️ 密钥将以明文写入 profile 的 cordis.patch.yml。'))
                 : null,
               detail && detail.warning
                 ? h('div', null,
-                    h('div', { className: 'mcpm-error' }, '⚠️ 这条自建条目有可疑之处：'),
+                    h('div', { className: 'mcpm-error' }, L('⚠️ 这条自建条目有可疑之处：')),
                     (detail.warningReasons || []).map((reason) => h('div', { key: reason, className: 'mcpm-note' }, '· ' + reason)))
                 : null,
               h('div', { className: 'mcpm-note' }, '⚠️ ' + option.risk),
@@ -1314,12 +1508,12 @@ window.__ModuleLoader__.load({
 
         option && (option.slots || []).length > 0
           ? h('div', null,
-              h('div', { className: 'mcpm-note' }, '命令参数'),
+              h('div', { className: 'mcpm-note' }, L('命令参数')),
               (option.slots || []).map((slot) => h('div', { key: slot.name, className: 'mcpm-field' },
                 h('label', { className: 'mcpm-field__label' }, slot.name, slot.isRequired ? h('span', { className: 'mcpm-required' }, ' *') : null),
                 h('input', {
                   type: 'text',
-                  placeholder: slot.format || (slot.isRequired ? '必填' : '可留空'),
+                  placeholder: slot.format || (slot.isRequired ? L('必填') : L('可留空')),
                   value: argValues[slot.name] === undefined ? '' : argValues[slot.name],
                   onChange: (event) => setArgValues((current) => ({ ...current, [slot.name]: event.target.value })),
                 }),
@@ -1332,8 +1526,8 @@ window.__ModuleLoader__.load({
               // The title tells the truth about what is left to do: an entry whose values are
               // all declared in the file has nothing to fill in, only something to change.
               h('div', { className: 'mcpm-note' }, option.variables.some((variable) => variable.default === '' && (variable.isRequired || variable.isSecret))
-                ? '需要填写'
-                : '配置（已有默认值，可改）'),
+                ? L('需要填写')
+                : L('配置（已有默认值，可改）')),
               option.variables.map((variable) => h('div', { key: variable.name, className: 'mcpm-field' },
                 h('label', { className: 'mcpm-field__label' }, variable.name, variable.isRequired ? h('span', { className: 'mcpm-required' }, ' *') : null),
                 h('input', {
@@ -1341,32 +1535,32 @@ window.__ModuleLoader__.load({
                   // A value declared in the file is already answered: show it masked and
                   // editable, and say where it came from rather than repeating the value.
                   placeholder: variable.default === ''
-                    ? (variable.isRequired ? '必填' : '可留空')
-                    : (detail && detail.source === 'local' ? '已在 local-entries.json 中定义' : variable.default),
+                    ? (variable.isRequired ? L('必填') : L('可留空'))
+                    : (detail && detail.source === 'local' ? L('已在 local-entries.json 中定义') : variable.default),
                   value: values[variable.name] === undefined ? '' : values[variable.name],
                   onChange: (event) => setValues((current) => ({ ...current, [variable.name]: event.target.value })),
                 }),
               )),
               h('div', { className: 'mcpm-note' },
-                '这些值会写进 profile 的 cordis.patch.yml（明文）。',
+                L('这些值会写进 profile 的 cordis.patch.yml（明文）。'),
                 detail && detail.installed && (detail.installed.configKeys || []).length > 0
-                  ? '已配置 ' + detail.installed.configKeys.join('、') + '，留空则保留原值。'
+                  ? L('已配置 ') + detail.installed.configKeys.join('、') + L('，留空则保留原值。')
                   : ''),
             )
           : null,
 
         option && option.variables.length === 0 && (option.slots || []).length === 0
-          ? h('div', { className: 'mcpm-note' }, '这个条目不需要填写任何配置。')
+          ? h('div', { className: 'mcpm-note' }, L('这个条目不需要填写任何配置。'))
           : null,
 
         detail && (detail.blocked || []).length > 0
-          ? h('div', { className: 'mcpm-note' }, '其它方式：' + detail.blocked.map((item) => item.registryType + '（' + item.reason + '）').join('；'))
+          ? h('div', { className: 'mcpm-note' }, L('其它方式：') + detail.blocked.map((item) => item.registryType + '（' + item.reason + '）').join('；'))
           : null,
 
         option
           ? h('div', { className: 'mcpm-actions' },
-              h('button', { type: 'button', className: 'mcpm-btn mcpm-btn--primary', 'data-state': busy ? 'busy' : 'idle', disabled: busy, onClick: install }, busy ? '安装中…' : '安装'),
-              h('button', { type: 'button', className: 'mcpm-btn', 'data-state': 'idle', disabled: busy, onClick: onClose }, '取消'),
+              h('button', { type: 'button', className: 'mcpm-btn mcpm-btn--primary', 'data-state': busy ? 'busy' : 'idle', disabled: busy, onClick: install }, busy ? L('安装中…') : L('安装')),
+              h('button', { type: 'button', className: 'mcpm-btn', 'data-state': 'idle', disabled: busy, onClick: onClose }, L('取消')),
             )
           : null,
       );
@@ -1396,28 +1590,28 @@ window.__ModuleLoader__.load({
       const openCalls = () => {
         const controller = dock.sidebarRight;
         if (!controller || typeof controller.openTab !== 'function') {
-          setNote('本部署没有右侧停靠栏，调用记录页打不开。');
+          setNote(L('本部署没有右侧停靠栏，调用记录页打不开。'));
           return;
         }
         try {
           controller.openTab(CALLS_KIND);
         } catch (e) {
-          setNote('打开失败：' + String((e && e.message) || e));
+          setNote(L('打开失败：') + String((e && e.message) || e));
         }
       };
 
       return h('div', { style: S.page },
         h('div', { style: S.head },
-          h('div', { style: S.title }, 'MCP 管理器'),
+          h('div', { style: S.title }, L('MCP 管理器')),
           h('div', { style: S.muted },
-            state.status === 'loading' ? '读取中…'
-              : rows.length + ' 条 MCP 行' + (value && value.source ? '（来源：' + value.source + '）' : '')),
-          h('button', { style: S.btn, onClick: openCalls }, '调用记录'),
-          h('button', { style: S.btn, onClick: load }, '刷新'),
+            state.status === 'loading' ? L('读取中…')
+              : rows.length + L(' 条 MCP 行') + (value && value.source ? L('（来源：') + value.source + '）' : '')),
+          h('button', { style: S.btn, onClick: openCalls }, L('调用记录')),
+          h('button', { style: S.btn, onClick: load }, L('刷新')),
         ),
 
         h('div', { style: { ...S.muted, marginBottom: 10 } },
-          '安装新的 MCP 服务器请到左侧导航的「MCP 市场」；这里管理已经装好的行。'),
+          L('安装新的 MCP 服务器请到左侧导航的「MCP 市场」；这里管理已经装好的行。')),
 
         note ? h('div', { style: { ...S.muted, marginBottom: 8 } }, note) : null,
 
@@ -1425,17 +1619,17 @@ window.__ModuleLoader__.load({
 
         state.status === 'ready' && !state.error && rows.length === 0
           ? h('div', { style: S.muted },
-              '当前 profile 里没有 @deepseek-ai/dsh-mcp-client 行。去左侧「MCP 市场」装一个，或装一个 MCP 组合包后回到这里刷新。')
+              L('当前 profile 里没有 @deepseek-ai/dsh-mcp-client 行。去左侧「MCP 市场」装一个，或装一个 MCP 组合包后回到这里刷新。'))
           : null,
 
         rows.map((row) => h(Row, { key: row.id || Math.random().toString(36), row, onReload: load })),
 
         h('div', { style: { ...S.muted, marginTop: 12, lineHeight: 1.7 } },
-          '改动写进当前 profile 的 cordis.patch.yml（由 DSH 的配置编辑服务落盘并热应用）；',
-          '带 * 的字段表示这一行已在 profile 里覆盖过。',
-          '「恢复默认」会移除覆盖项、回到组合包声明的值。',
-          caps.write === false ? '（注意：本 profile 未挂载 configEditor，只能读。）' : '',
-          caps.rowPages === false ? '（有行缺少所属组合包信息，逐行配置页暂不可用。）' : '',
+          L('改动写进当前 profile 的 cordis.patch.yml（由 DSH 的配置编辑服务落盘并热应用）；'),
+          L('带 * 的字段表示这一行已在 profile 里覆盖过。'),
+          L('「恢复默认」会移除覆盖项、回到组合包声明的值。'),
+          caps.write === false ? L('（注意：本 profile 未挂载 configEditor，只能读。）') : '',
+          caps.rowPages === false ? L('（有行缺少所属组合包信息，逐行配置页暂不可用。）') : '',
         ),
       );
     }
@@ -1515,7 +1709,7 @@ window.__ModuleLoader__.load({
               name: 'sidebar.panellist',
               id: MARKET_PANEL_ID,
               order: MARKET_PANEL_ORDER,
-              label: () => 'MCP 市场',
+              label: () => L('MCP 市场'),
             }, MarketIcon);
           } catch (error) {
             // A nav slot this shell refuses must cost the nav entry, never the boot: a

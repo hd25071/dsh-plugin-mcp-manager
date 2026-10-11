@@ -262,7 +262,7 @@ test('the result title says what is actually listed', () => {
   // The other branch is wording only; the steered pass cannot carry an empty query and an
   // open dialog at once, so it is asserted at the source.
   const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8');
-  assert.match(source, /query\.trim\(\) === '' \? '全部服务器' : '搜索结果'/,
+  assert.match(source, /query\.trim\(\) === '' \? L\('全部服务器'\) : L\('搜索结果'\)/,
     'with no query the list is everything, and the title must say so');
 });
 test('badges are capped at three with a +N chip, and the long transport name is shortened', () => {
@@ -392,4 +392,17 @@ test('no HTML injection path exists in the browser half', () => {
     assert.doesNotMatch(source, pattern, String(pattern) + ' must not appear in the browser half');
   }
   assert.doesNotMatch(source, /<script|javascript:/, 'no raw markup or script URLs');
+});
+
+test('the panel speaks English when the host is set to it', () => {
+  const before = globalThis.window.localStorage;
+  globalThis.window.localStorage = { getItem: (key) => (key === 'mcpm-locale' ? 'en' : null), setItem() {} };
+  try {
+    const text = renderDeep(componentFor('main')({}));
+    assert.match(text, /All servers|Installed|Search/, 'the English table must reach the page: ' + text.slice(0, 160));
+    // Fixture data (registry titles) can be Chinese; the panel's own words cannot be.
+    assert.doesNotMatch(text, /全部服务器|刷新目录|搜索 MCP 服务器|上一页|下一页/, 'the panel must speak English: ' + text.slice(0, 400));
+  } finally {
+    globalThis.window.localStorage = before;
+  }
 });
