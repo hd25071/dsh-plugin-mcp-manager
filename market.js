@@ -1271,6 +1271,31 @@ function profileLinksTo(dir, slug, target) {
  * @param ours - the current profile \`{name, dir}\`, or null when the host did not say.
  * @returns \`{ok: true, references, ownership}\` or \`{ok: false, code, reason}\`.
  */
+/**
+ * What the dsh installation itself provides, read from its own package.json.
+ *
+ * The real `listBundles` treats a bundle named in the install anchor's dependencies as one the
+ * installation supplies rather than one a profile installed: it counts it as present, and it is
+ * not removable. Reading it here is what keeps a profile from removing a bundle that belongs to
+ * the installation, and an anchor that cannot be read is reported rather than assumed empty — an
+ * assumption would turn "unknown" into "nothing to protect".
+ *
+ * @returns `{status: 'provides'|'absent'|'unreadable', path}`.
+ */
+export function installationProvides(pkg, anchorPath) {
+  const path = typeof anchorPath === 'string' ? anchorPath : '';
+  if (path === '') return { status: 'unreadable', path };
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    return { status: 'unreadable', path };
+  }
+  if (manifest === null || typeof manifest !== 'object') return { status: 'unreadable', path };
+  const dependencies = manifest.dependencies !== null && typeof manifest.dependencies === 'object' ? manifest.dependencies : {};
+  return { status: Object.hasOwn(dependencies, pkg) ? 'provides' : 'absent', path };
+}
+
 export function bundleReferences(slug, ours = null) {
   const name = String(slug === undefined || slug === null ? '' : slug);
   if (!SLUG_PATTERN.test(name)) {

@@ -66,15 +66,23 @@ function seedCache() {
 
 /** A context with a recording connection and a recording plugin manager. */
 function makeCtx() {
+  // The host says which profile is asking and where the installation's own package.json is: without
+  // either, a profile-scoped operation cannot be confirmed and is refused rather than guessed.
+  const profileDir = join(home, '.dsh', 'profiles', 'desktop');
+  mkdirSync(profileDir, { recursive: true });
+  writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-desktop', dependencies: {}, dsh: { profile: { bundles: [] } } }));
+  mkdirSync(join(home, 'app'), { recursive: true });
+  writeFileSync(join(home, 'app', 'package.json'), JSON.stringify({ name: 'dsh-app', dependencies: {} }));
   const routes = new Map();
   const calls = { install: [], remove: [] };
   const ctx = {
     get(key) {
       if (key === 'connection') return { fetch: { register(spec) { routes.set(spec.path, spec); } } };
+      if (key === 'profileContext') return { name: 'desktop', dir: profileDir, installAnchor: join(home, 'app', 'package.json') };
       if (key === 'pluginManager') {
         return {
           async installBundle(spec, options) { calls.install.push({ spec, options }); return { application: 'applied' }; },
-          async removeBundle(name) { calls.remove.push(name); return { exitCode: 0 }; },
+          async removeBundle(name) { calls.remove.push(name); return { application: 'applied' }; },
         };
       }
       return undefined;
@@ -175,14 +183,22 @@ test('uninstall removes the bundle first and the directory after', async () => {
     post({ name: 'vendor.example/mcp', optionIndex: 0, config: {} }));
   const slug = installed.body.value.slug;
 
+  // The profile leaves; the bytes stay. What this checks is that the official removal is the one
+  // that ran, and that nothing on disk was deleted on the way out.
   const removed = await call(routes, host.MARKET_UNINSTALL_PATH, host.MARKET_UNINSTALL_PATH, post({ slug }));
-  assert.equal(removed.status, 200);
+  assert.equal(removed.status, 200, JSON.stringify(removed.body));
   assert.deepEqual(calls.remove, [market.BUNDLE_PREFIX + slug]);
-  assert.equal(existsSync(installed.body.value.dir), false);
-  assert.equal(market.listInstalled().length, 0);
+  assert.equal(removed.body.value.detached, true);
+  assert.equal(removed.body.value.bundleKept, true);
+  assert.equal(removed.body.value.deleted, false);
+  assert.equal(existsSync(installed.body.value.dir), true, 'the installed bundle is still there');
+  assert.equal(market.listInstalled().length, 1, 'and still known: what left is the profile dependency');
 
+  // Asked again, the bundle is still known, so the route does not report it as missing. The fake
+  // always answers applied, so this says nothing about how a real second removal behaves.
   const again = await call(routes, host.MARKET_UNINSTALL_PATH, host.MARKET_UNINSTALL_PATH, post({ slug }));
-  assert.equal(again.status, 404);
+  assert.equal(again.status, 200, JSON.stringify(again.body));
+  assert.equal(again.body.value.bundleKept, true);
 });
 
 test('without the plugin manager the install routes degrade instead of throwing', async () => {

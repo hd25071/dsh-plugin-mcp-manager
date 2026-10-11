@@ -1785,30 +1785,62 @@ async function marketUninstallResponse(request, ctx) {
   if (manager === undefined || typeof manager.removeBundle !== 'function') {
     return failure('service-unavailable', 'the pluginManager service is not mounted in this profile', 503);
   }
-  // Whoever else loads this bundle is checked before anything is called: `removeBundle` rewrites
-  // this profile's configuration and `removeBundleDir` deletes the directory every other profile
-  // reading it points at. Once either has run the damage is done, so the refusal has to come first
-  // and without touching the profile at all.
-  const shared = sharedBundleRefusal(ctx, slug);
-  if (shared.ok !== true) {
-    return json({ ok: false, error: { code: shared.code, message: shared.message, path: shared.path, sharedWith: shared.sharedWith } }, 409);
+  // Detaching is this profile's business: it rewrites this profile's configuration and nothing
+  // else, so another profile reading the same bytes is not a reason to refuse it. Whether the bytes
+  // themselves may go is a different question, answered by who else loads them — and this round
+  // does not delete them at all, so a profile leaving cannot damage a shared bundle.
+  //
+  // One thing does stop it: a bundle the dsh installation provides is not a profile's to remove.
+  const profile = serviceOf(ctx, 'profileContext');
+  const anchorPath = profile !== null && profile !== undefined && typeof profile.installAnchor === 'string' ? profile.installAnchor : '';
+  const provided = market.installationProvides(manifest.pkg, anchorPath);
+  if (provided.status === 'provides') {
+    return json({ ok: false, error: { code: 'uninstall-not-removable', message: `${manifest.pkg} is provided by the dsh installation itself, so this profile cannot remove it`, path: provided.path } }, 409);
   }
+  if (provided.status === 'unreadable') {
+    return json({ ok: false, error: { code: 'uninstall-references-unknown', message: `what the dsh installation provides could not be read from ${provided.path}, so this bundle is not removed`, path: provided.path } }, 409);
+  }
+  // Which profile is asking has to be known before anything is called: without it a reference can
+  // neither be attributed nor checked afterwards, and a detach that cannot be confirmed is not one
+  // to perform. References that cannot be read are refused for the same reason — not because
+  // someone else is using the bundle, but because this profile's own state would be unverifiable.
+  const mine = currentProfileOf(ctx);
+  const before = market.bundleReferences(slug, mine);
+  if (before.ok !== true || before.ownership !== 'known') {
+    const why = before.ok !== true ? before.reason : 'the host did not say which profile this is';
+    return json({ ok: false, error: { code: 'uninstall-references-unknown', message: 'this profile\'s references could not be established (' + why + '), so the bundle is left as it is' } }, 409);
+  }
+  const others = before.references.filter((item) => item.current !== true);
   let removed;
   try {
     removed = await manager.removeBundle(manifest.pkg);
   } catch (error) {
     return failure('uninstall-failed', String((error && error.message) || error), 500);
   }
-  const deleted = market.removeBundleDir(slug);
-  // The package manager leaves its junction behind, pointing at the directory just deleted.
-  // Pruning it here is the difference between "uninstalled" and "uninstalled with a dead link
-  // still sitting in the profile's node_modules".
-  const pruned = market.pruneBundleLinks(slug);
+  // The promise settling is not the news. `change()` folds its own errors into the result, so the
+  // answer is what `application` says — the same judgement the install path makes.
+  const outcome = market.installOutcome(removed);
+  if (outcome.ok !== true) {
+    return failure('uninstall-not-applied', `the installer did not remove the bundle: ${outcome.code}`, 502);
+  }
+  // And the claim is checked rather than assumed: the profile has to have stopped declaring it.
+  const after = market.bundleReferences(slug, mine);
+  // A link left in node_modules is residue, not a dependency: what has to have gone is the
+  // profile's own declaration. Counting the link here would refuse a detach that worked.
+  const stillMine = after.ok === true ? after.references.filter((item) => item.current === true && item.declared === true) : [];
+  if (stillMine.length > 0) {
+    return failure('uninstall-not-confirmed', 'the profile still declares this bundle after the installer reported removing it', 500);
+  }
   return json({
     ok: true,
     value: {
-      slug, pkg: manifest.pkg, removed: removed === undefined ? null : removed, deleted, pruned,
-      sharedWith: shared.references,
+      slug, pkg: manifest.pkg,
+      detached: true,
+      // The bundle directory is left where it is: this round detaches and does not retire.
+      bundleKept: true, deleted: false, pruned: 0,
+      application: removed !== null && removed !== undefined && typeof removed.application === 'string' ? removed.application : '',
+      others,
+      referencesUnknown: before.ok !== true,
     },
   });
 }

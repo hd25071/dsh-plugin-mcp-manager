@@ -33,6 +33,10 @@ const bundleDir = () => market.bundleDir(slug());
 const rowId = () => market.rowIdForSlug(slug());
 
 beforeEach(() => {
+  // The dsh installation's own package.json: it provides nothing here, but a profile cannot be
+  // detached without it, so every case has to have one to be a case about anything else.
+  mkdirSync(join(home, 'app'), { recursive: true });
+  writeFileSync(join(home, 'app', 'package.json'), JSON.stringify({ name: 'dsh-app', dependencies: {} }), 'utf8');
   rmSync(market.MARKET_ROOT, { recursive: true, force: true });
   rmSync(market.CACHE_DIR, { recursive: true, force: true });
   rmSync(PROFILES, { recursive: true, force: true });
@@ -102,7 +106,19 @@ function makeCtx({ currentProfile = 'alpha' } = {}) {
       }
       if (key === 'pluginManager') return {
         async installBundle(dir, options) { calls.install.push({ dir, options }); return { application: 'applied' }; },
-        async removeBundle(name) { calls.remove.push(name); return { application: 'applied' }; },
+        async removeBundle(name) {
+          calls.remove.push(name);
+          // The real one rewrites this profile's configuration; a fake that only records the call
+          // leaves a state the confirmation step is right to refuse.
+          const path = join(PROFILES, currentProfile, 'package.json');
+          if (existsSync(path)) {
+            const manifest = JSON.parse(readFileSync(path, 'utf8'));
+            delete (manifest.dependencies || {})[name];
+            manifest.dsh.profile.bundles = (manifest.dsh.profile.bundles || []).filter((item) => item !== name);
+            writeFileSync(path, JSON.stringify(manifest), 'utf8');
+          }
+          return { application: 'applied' };
+        },
         listBundles() {
           return existsSync(join(bundleDir(), 'market.meta.json'))
             ? [{ name: pkg(), installed: true, enabled: true, removable: true, rows: [{ rowId: rowId(), moduleName: host.MCP_MODULE }] }]
@@ -185,21 +201,27 @@ test('without a current profile identity an update is refused rather than guesse
 
 // --- uninstall ---------------------------------------------------------------------------------
 
-test('an uninstall is refused while another profile still references the bundle', async () => {
+test('an uninstall detaches this profile even while another one still references the bundle', async () => {
   seedCache();
   seedBundle();
   profileDeclaring('alpha');
   profileDeclaring('beta');
   const { routes, calls } = makeCtx({ currentProfile: 'alpha' });
 
-  const refused = await uninstall(routes);
-  assert.equal(refused.status, 409);
-  assert.equal(refused.body.error.code, 'shared-bundle');
-  assert.deepEqual(calls.remove, [], 'a refused uninstall must not touch the profile at all');
+  // The old expectation here was a refusal. That was wrong for a profile-scoped operation: leaving
+  // is this profile's business, and refusing it because someone else is still reading the bytes
+  // turns a shared bundle into one nobody can leave. What changes is that the bytes stay.
+  const removed = await uninstall(routes);
+  assert.equal(removed.status, 200, JSON.stringify(removed.body));
+  assert.deepEqual(calls.remove, [pkg()], 'the official removal runs, for this profile');
+  assert.equal(removed.body.value.detached, true);
+  assert.equal(removed.body.value.bundleKept, true, 'and the bundle stays for the profile reading it');
+  assert.equal(removed.body.value.deleted, false);
+  assert.equal(removed.body.value.others.some((item) => item.profile === 'beta'), true, 'the answer names who else is reading it');
   assertBundleUntouched();
 });
 
-test('an uninstall is refused when the references cannot be read', async () => {
+test('an uninstall is refused when the references cannot be established', async () => {
   seedCache();
   seedBundle();
   mkdirSync(join(home, '.dsh'), { recursive: true });
@@ -208,12 +230,12 @@ test('an uninstall is refused when the references cannot be read', async () => {
 
   const refused = await uninstall(routes);
   assert.equal(refused.status, 409);
-  assert.equal(refused.body.error.code, 'shared-bundle-unknown');
-  assert.deepEqual(calls.remove, []);
+  assert.equal(refused.body.error.code, 'uninstall-references-unknown');
+  assert.deepEqual(calls.remove, [], 'nothing is called when the profile cannot be established');
   assertBundleUntouched();
 });
 
-test('an uninstall is refused without a current profile identity when anyone references it', async () => {
+test('an uninstall is refused without a current profile identity', async () => {
   seedCache();
   seedBundle();
   profileDeclaring('alpha');
@@ -221,7 +243,7 @@ test('an uninstall is refused without a current profile identity when anyone ref
 
   const refused = await uninstall(routes);
   assert.equal(refused.status, 409);
-  assert.equal(refused.body.error.code, 'shared-bundle-unknown');
+  assert.equal(refused.body.error.code, 'uninstall-references-unknown');
   assert.deepEqual(calls.remove, []);
   assertBundleUntouched();
 });
@@ -237,7 +259,10 @@ test('a single profile that owns the bundle can uninstall it', async () => {
   const removed = await uninstall(routes);
   assert.equal(removed.status, 200);
   assert.deepEqual(calls.remove, [pkg()], 'the official removal is the one that runs');
-  assert.equal(existsSync(bundleDir()), false, 'and the directory goes only after it');
+  assert.equal(removed.body.value.detached, true);
+  assert.equal(removed.body.value.bundleKept, true);
+  assert.equal(existsSync(bundleDir()), true, 'and the directory stays: detaching is not retiring');
+  assert.equal(readFileSync(join(bundleDir(), 'cordis.patch.yml'), 'utf8'), PATCH, 'byte for byte');
 });
 
 test('a single profile that owns the bundle can update it', async () => {
@@ -259,10 +284,12 @@ test('a profile that only links the bundle counts as a reference even without de
   profileDeclaring('beta', { declare: false, link: true });
   const { routes, calls } = makeCtx({ currentProfile: 'alpha' });
 
-  const refused = await uninstall(routes);
-  assert.equal(refused.status, 409);
-  assert.equal(refused.body.error.code, 'shared-bundle');
-  assert.deepEqual(calls.remove, []);
+  const removed = await uninstall(routes);
+  assert.equal(removed.status, 200, JSON.stringify(removed.body));
+  assert.deepEqual(calls.remove, [pkg()]);
+  assert.equal(removed.body.value.bundleKept, true);
+  assert.equal(removed.body.value.others.some((item) => item.profile === 'beta'), true,
+    'a profile that only links the bytes is still named as reading them');
   assertBundleUntouched();
 });
 
@@ -277,4 +304,6 @@ test('a silent profile directory is not a reference at all', async () => {
   const removed = await uninstall(routes);
   assert.equal(removed.status, 200, 'directories that say nothing about this bundle do not block it');
   assert.deepEqual(calls.remove, [pkg()]);
+  assert.equal(removed.body.value.others.length, 0, 'and nothing else is reported as reading it');
+  assert.equal(existsSync(bundleDir()), true);
 });

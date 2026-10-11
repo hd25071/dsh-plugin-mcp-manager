@@ -284,14 +284,20 @@ test('uninstalling a local entry takes the same path as a registry one', async (
       if (key === 'connection') return { fetch: { register(spec) { routes.set(spec.path, spec); } } };
       // The junction below is in the asking profile's own node_modules, so the host has to say which
       // profile is asking: a link this profile owns is its own residue to clean, not a shared bundle.
-      if (key === 'profileContext') return { name: 'desktop', dir: join(home, '.dsh', 'profiles', 'desktop') };
-      if (key === 'pluginManager') return { async removeBundle(name) { calls.remove.push(name); return { exitCode: 0 }; } };
+      if (key === 'profileContext') return { name: 'desktop', dir: join(home, '.dsh', 'profiles', 'desktop'), installAnchor: join(home, 'app', 'package.json') };
+      if (key === 'pluginManager') return { async removeBundle(name) { calls.remove.push(name); return { application: 'applied' }; } };
       return undefined;
     },
   };
+  // The profile and the installation both have to be readable for a detach to be confirmable.
+  const profileDir = join(home, '.dsh', 'profiles', 'desktop');
+  mkdirSync(profileDir, { recursive: true });
+  writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-desktop', dependencies: {}, dsh: { profile: { bundles: [] } } }));
+  mkdirSync(join(home, 'app'), { recursive: true });
+  writeFileSync(join(home, 'app', 'package.json'), JSON.stringify({ name: 'dsh-app', dependencies: {} }));
   host.apply(ctx);
-  // The junction pnpm leaves in the profile is part of the residue, and the route reports
-  // what it pruned so the UI can say so.
+  // The junction pnpm leaves in the profile is residue. It stays where it is: this round detaches
+  // and does not retire, so nothing under the market root or in node_modules is deleted.
   const scope = join(home, '.dsh', 'profiles', 'desktop', 'node_modules', '@dsh-mcp-market');
   mkdirSync(scope, { recursive: true });
   symlinkSync(market.bundleDir(slug), join(scope, slug), 'junction');
@@ -301,11 +307,15 @@ test('uninstalling a local entry takes the same path as a registry one', async (
   }));
   assert.equal(response.status, 200);
   const body = await response.json();
-  assert.deepEqual(calls.remove, ['@dsh-mcp-market/' + slug], 'removeBundle first');
-  assert.equal(existsSync(market.bundleDir(slug)), false, 'then the directory goes');
-  assert.equal(market.listInstalled().length, 0, 'and the manifest forgets it');
-  assert.equal(body.value.pruned.length, 1, 'and the dead link it left behind is pruned');
-  assert.equal(existsSync(join(scope, slug)), false);
+  assert.deepEqual(calls.remove, ['@dsh-mcp-market/' + slug], 'the official removal is the one that runs');
+  assert.equal(body.value.detached, true);
+  assert.equal(body.value.bundleKept, true, 'and the bundle is kept, not deleted');
+  assert.equal(body.value.deleted, false);
+  assert.equal(body.value.pruned, 0, 'nothing is pruned: the link is not dead while the bundle is there');
+  assert.equal(existsSync(market.bundleDir(slug)), true, 'the bundle directory stays');
+  assert.equal(readFileSync(join(market.bundleDir(slug), 'market.meta.json'), 'utf8').includes('vendor.example/notes'), true, 'with its bytes intact');
+  assert.equal(market.listInstalled().length, 1, 'and it is still known');
+  assert.equal(existsSync(join(scope, slug)), true, 'the junction is left where it was');
 });
 
 test('an entry whose values are all declared installs without a form', async () => {
