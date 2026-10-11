@@ -77,6 +77,16 @@ function fault(step) {
   throw error;
 }
 
+/**
+ * Make one named step fail, for a caller that has to prove what happens when it does.
+ *
+ * Exported so a failure that is hard to produce on purpose — a rename Windows refuses, a handle it
+ * holds — has a deterministic stand-in in a test. It can only fail a step; it cannot skip a check.
+ */
+export function faultForTest(step) {
+  fault(step);
+}
+
 /** Read the journal, telling "no journal" apart from "a journal that cannot be read". */
 export function readJournal(root, slug) {
   const { journal } = txPaths(root, slug);
@@ -262,6 +272,18 @@ export function restore({ root, slug, bundleDir, txid, announce, owns }) {
     if (owns !== true) {
       return { ok: false, reason: 'the published directory cannot be proven to belong to this transaction', restored: false, removed: false };
     }
+    // Ownership is not enough: a directory that carries our id but not our content is a directory
+    // somebody else has since changed, and removing it would destroy that change.
+    const content = verifyBundleContent(bundleDir);
+    if (content.ok !== true || content.verifiable !== true || content.matches !== true) {
+      return {
+        ok: false,
+        reason: 'the published directory does not match the digest this transaction rendered, so it is not removed'
+          + (content.reason === undefined ? '' : ': ' + content.reason),
+        restored: false,
+        removed: false,
+      };
+    }
     try {
       rmSync(bundleDir, { recursive: true, force: true });
       removed = true;
@@ -299,6 +321,43 @@ export function digestOf(files) {
     hash.update('\u0000');
   }
   return hash.digest('hex');
+}
+
+/**
+ * Whether a bundle directory still holds exactly what the transaction that wrote it rendered.
+ *
+ * The manifest records a digest of the two files the renderer produces, so this answers a question
+ * the transaction id alone cannot: is this directory still the one we wrote, or has something
+ * changed inside it since? A directory that fails this test is nobody's to delete — not even the
+ * transaction that created it, because the content that is there now is not the content it made.
+ */
+export function verifyBundleContent(dir) {
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(join(dir, 'market.meta.json'), 'utf8'));
+  } catch (error) {
+    return { ok: false, readable: false, txid: '', reason: 'the manifest could not be read (' + String((error && error.code) || 'invalid JSON') + ')' };
+  }
+  if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    return { ok: false, readable: false, txid: '', reason: 'the manifest is not an object' };
+  }
+  const txid = typeof manifest.txid === 'string' ? manifest.txid : '';
+  const recorded = typeof manifest.renderDigest === 'string' ? manifest.renderDigest : '';
+  if (recorded === '') {
+    // Written before the digest existed: its content cannot be checked, which is a different answer
+    // from "it is fine" and must not be read as one.
+    return { ok: true, readable: true, txid, recorded: '', verifiable: false, matches: false, reason: 'the manifest records no digest, so this content cannot be verified' };
+  }
+  let manifestJson;
+  let patch;
+  try {
+    manifestJson = readFileSync(join(dir, 'package.json'), 'utf8');
+    patch = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8');
+  } catch (error) {
+    return { ok: false, readable: true, txid, recorded, reason: 'the rendered files could not be read (' + String((error && error.code) || error) + ')' };
+  }
+  const actual = digestOf({ 'package.json': manifestJson, 'cordis.patch.yml': patch });
+  return { ok: true, readable: true, txid, recorded, actual, verifiable: true, matches: actual === recorded };
 }
 
 /** The transaction id a published bundle's own manifest claims, or an empty string. */
@@ -492,6 +551,11 @@ export function readLiveBundle(bundleDir) {
     rowId: typeof manifest.rowId === 'string' ? manifest.rowId : '',
     serverName: typeof manifest.serverName === 'string' ? manifest.serverName : '',
     renderDigest: typeof manifest.renderDigest === 'string' ? manifest.renderDigest : '',
+    // Names, never values: the manifest also holds what a person typed into the argument slots, and
+    // a diagnostic answer is not the place to read that back out.
+    configKeys: Array.isArray(manifest.configKeys) ? manifest.configKeys.filter((key) => typeof key === 'string') : [],
+    command: typeof manifest.command === 'string' ? manifest.command : '',
+    argCount: Array.isArray(manifest.args) ? manifest.args.length : 0,
     configKeyCount: Array.isArray(manifest.configKeys) ? manifest.configKeys.length : 0,
     reason: '',
   };
@@ -539,7 +603,10 @@ export function diagnoseTransaction({ slug, root: root0, journal, staging, backu
   if (mismatch && liveShouldBeOurs) add('txid-mismatch', 'the journal describes ' + declaredTxid + ' and the published bundle claims ' + live.txid);
   else if (mismatch) add('live-is-previous-version', 'the published bundle still claims ' + live.txid + ', which is the version this transaction is replacing');
   if (live && live.present !== true) add('live-missing', 'the published directory does not exist');
-  if (lock && lock.state !== 'free') add('lock-held', 'a lock is present (' + lock.reason + ')');
+  // A lock this request is holding itself is not a reason to refuse: the reader was asked to look
+  // at the slug by the very operation that owns it.
+  const lockBlocks = lock !== undefined && lock !== null && lock.state !== 'free' && lock.state !== 'self';
+  if (lockBlocks) add('lock-held', 'a lock is present (' + lock.reason + ')');
   if (official && official.readable !== true) add('profile-unreadable', official.reason || 'the profile state could not be read');
   if (official && official.readable === true && official.installed !== true) add('not-installed-officially', 'the profile does not list this bundle as an installed dependency');
   if (official && official.readable === true && official.rowLive !== true) add('row-not-live', 'no row in the running configuration matches this manifest');
@@ -585,7 +652,7 @@ export function diagnoseTransaction({ slug, root: root0, journal, staging, backu
   else if (present && !readable) state = 'journal-corrupt';
   else if (record !== null && phase !== '' && !TX_PHASES.includes(phase)) state = untrustedPaths ? 'orphan-artifacts' : 'journal-corrupt';
   else if (untrustedPaths) state = 'orphan-artifacts';
-  else if (lock && lock.state !== 'free') state = 'lock-blocked';
+  else if (lockBlocks) state = 'lock-blocked';
   else if (record !== null && phase === 'NEEDS_ATTENTION') state = 'needs-attention';
   else if (mismatch && liveShouldBeOurs) state = stop.state;
   else if (record !== null && (phase === 'APPLYING' || phase === 'VERIFYING')) state = 'applying-unknown';

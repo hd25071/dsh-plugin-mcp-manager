@@ -40,7 +40,8 @@
     "cordis.patch.yml",
     "README.md",
     "LICENSE",
-    "tx.js"
+    "tx.js",
+    "repair.js"
   ],
   "engines": {
     "node": ">=20"

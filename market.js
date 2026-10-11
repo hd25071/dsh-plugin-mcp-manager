@@ -2013,7 +2013,7 @@ export function cachePath() {
  * lead to different decisions, and nothing here decides: a dead holder is reported as dead and the
  * lock is left exactly where it is.
  */
-export function lockStateFor(slug) {
+export function lockStateFor(slug, selfTxid = '') {
   const name = String(slug === undefined || slug === null ? '' : slug);
   if (!SLUG_PATTERN.test(name)) {
     return { state: 'unreadable', reason: 'the slug is not a slug, so no lock path may be built from it', alive: false, txid: '', op: '', path: '' };
@@ -2028,11 +2028,19 @@ export function lockStateFor(slug) {
   }
   const running = inFlightSlugs.get(name);
   if (running !== undefined) {
+    // The caller may be the operation holding it: a route that takes the lock and then re-reads the
+    // state would otherwise be told it is blocked by itself.
+    if (selfTxid !== '' && running.txid === selfTxid) {
+      return { state: 'self', reason: 'this request holds the lock', alive: true, txid: running.txid, op: running.op, path: reported };
+    }
     return { state: 'held', reason: 'this process is running "' + running.op + '" on this slug', alive: true, txid: running.txid, op: running.op, path: reported };
   }
   const existing = describeLock(path);
   if (existing.ok !== true) {
     return { state: 'unreadable', reason: existing.reason, alive: false, txid: '', op: '', path: reported };
+  }
+  if (selfTxid !== '' && existing.record.txid === selfTxid) {
+    return { state: 'self', reason: 'this request holds the lock', alive: true, txid: existing.record.txid, op: String(existing.record.op), path: reported };
   }
   return {
     state: 'held',

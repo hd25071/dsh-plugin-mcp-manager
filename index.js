@@ -26,6 +26,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import * as market from './market.js';
+import * as repair from './repair.js';
 import * as tx from './tx.js';
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -49,6 +50,7 @@ export const MARKET_SEARCH_PATH = '/api/mcp-manager/market/search';
 export const MARKET_DETAIL_PATH = '/api/mcp-manager/market/detail';
 export const MARKET_INSTALL_PATH = '/api/mcp-manager/market/install';
 export const MARKET_UNINSTALL_PATH = '/api/mcp-manager/market/uninstall';
+export const MARKET_REPAIR_PATH = '/api/mcp-manager/market/repair';
 export const MARKET_INSTALLED_PATH = '/api/mcp-manager/market/installed';
 
 /** Tool names an MCP server contributes are prefixed this way. */
@@ -1534,6 +1536,181 @@ function settleFailure(code, message, status, { ctx, manager, slug, txid, writte
     written, identity, txid, phase: 'ROLLED_BACK', restored: put.restored === true, backup: backupPath, result, verification,
   });
 }
+
+/**
+ * Repair one leftover transaction, explicitly and only with evidence.
+ *
+ * The caller names an action; it does not name a state. Everything that decides whether the action
+ * is allowed — the diagnosis, the ownership of each directory, whether the content still matches
+ * what was rendered, what the profile says — is recomputed here (and again under the lock), and the
+ * decision itself lives in \`repair.js\`. This route only validates the request, takes the lock,
+ * re-reads, and converts the outcome into an answer.
+ *
+ * A dry run takes no lock and writes nothing, so it can be asked at any time. The commit is
+ * required to agree with the plan it was given: if the state moved in between, it is refused rather
+ * than applied to a situation nobody agreed to.
+ *
+ * @param request - the incoming request.
+ * @param ctx - the plugin context.
+ * @returns the repair envelope.
+ */
+async function marketRepairResponse(request, ctx) {
+  const manager = serviceOf(ctx, 'pluginManager');
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return failure('bad-request', 'body must be JSON', 400);
+  }
+  const slug = typeof body.slug === 'string' ? body.slug : '';
+  if (!market.SLUG_PATTERN.test(slug)) {
+    return failure('bad-request', 'slug must be a slug this plugin produced, never a path', 400);
+  }
+  const action = typeof body.action === 'string' ? body.action : '';
+  if (!repair.REPAIR_ACTIONS.includes(action)) {
+    return failure('unknown-action', `"${action}" is not a repair action; expected one of ${repair.REPAIR_ACTIONS.join(', ')}`, 400);
+  }
+  const txid = typeof body.txid === 'string' ? body.txid : '';
+  const expect = body.expect !== null && typeof body.expect === 'object' ? body.expect : null;
+  const bundleDir = market.bundleDir(slug);
+  const inputs = (selfTxid) => repairInputs(ctx, manager, slug, selfTxid === undefined ? '' : selfTxid);
+  const planned = (evidence) => repair.planRepair({
+    action, slug, txid, diagnosis: evidence.diagnosis, live: evidence.live, row: evidence.row, root: market.MARKET_ROOT, bundleDir,
+  });
+
+  if (body.dryRun === true) {
+    const evidence = inputs();
+    const plan = planned(evidence);
+    return json({ ok: true, value: repairAnswer(plan, evidence, { dryRun: true, outcome: plan.outcome }) });
+  }
+
+  const held = market.acquireOperationLock({ slug, op: 'repair' });
+  if (held.ok !== true) {
+    // A repair is refused by a lock exactly like an install is, and the holder is named: holding a
+    // lock and being dead are different answers, and the caller needs to see which one this is.
+    return json({ ok: false, error: { code: 'lock-blocked', message: held.reason, lock: market.lockStateFor(slug) } }, 409);
+  }
+  try {
+    const evidence = inputs(held.txid);
+    if (expect !== null && (expect.state !== evidence.diagnosis.state || String(expect.phase || '') !== evidence.diagnosis.phase)) {
+      return json({
+        ok: false,
+        error: {
+          code: 'stale-transaction',
+          message: `this slug is now ${evidence.diagnosis.state} (${evidence.diagnosis.phase === '' ? 'no phase' : evidence.diagnosis.phase}), which is not the ${expect.state} the plan was made against`,
+          state: evidence.diagnosis.state,
+          phase: evidence.diagnosis.phase,
+        },
+      }, 409);
+    }
+    const plan = planned(evidence);
+    if (plan.allowed !== true) {
+      return json({ ok: false, error: { code: plan.code, message: plan.reasons.join('; '), reasons: plan.reasons, state: plan.state, phase: plan.phase } }, 409);
+    }
+    const done = repair.executeRepair({
+      action, root: market.MARKET_ROOT, slug, txid: plan.txid, plan, bundleDir,
+      expected: { rowId: evidence.live.rowId || '', serverName: evidence.live.serverName || '' },
+    });
+    if (done.ok !== true) {
+      return json({
+        ok: false,
+        error: { code: done.code, message: done.message, needsAttention: done.code === 'needs-attention', txid: plan.txid },
+        value: repairAnswer(plan, evidence, { dryRun: false, outcome: done.outcome }),
+      }, 500);
+    }
+    return json({
+      ok: true,
+      value: repairAnswer(plan, evidence, {
+        dryRun: false,
+        outcome: done.outcome,
+        pendingRestart: done.pendingRestart === true,
+        verified: done.verified === true,
+        live: done.live === true,
+      }),
+    });
+  } finally {
+    market.releaseOperationLock(held);
+  }
+}
+
+/** Everything the repair decision needs, read once, without writing anything. */
+function repairInputs(ctx, manager, slug, selfTxid = '') {
+  const live = tx.readLiveBundle(market.bundleDir(slug));
+  const diagnosis = tx.diagnoseSlug({
+    root: market.MARKET_ROOT,
+    slug,
+    live,
+    official: officialStateFor(ctx, manager, slug, market.manifestFor(slug)),
+    lock: market.lockStateFor(slug, selfTxid),
+    shared: sharedReferenceSummary(ctx, slug),
+    dangling: market.danglingBundleLinks().filter((item) => item.slug === slug),
+  });
+  return { live, diagnosis, row: live.manifestOk === true ? effectiveRowFor(ctx, live.rowId) : { present: false } };
+}
+
+/**
+ * The whole row the running configuration carries for one id, as far as it can be compared.
+ *
+ * `currentRowConfig` deliberately returns only the values a user typed, because that is what a
+ * reinstall has to preserve. Deciding whether an install took effect needs more than that: the name
+ * the row loads under and the command it runs are part of the claim being checked.
+ *
+ * @param ctx - the plugin context.
+ * @param rowId - the generated row's id.
+ * @returns `{present, serverName, command, envKeys}`; `envKeys` is empty, not null, when the row
+ *   exists and carries no configured values at all — an empty set is an answer, not a missing one.
+ */
+function effectiveRowFor(ctx, rowId) {
+  const rows = profileMcpRows(ctx);
+  if (!Array.isArray(rows) || rowId === '' || !rows.some((candidate) => candidate.id === rowId)) {
+    return { present: false, serverName: '', command: '', envKeys: [] };
+  }
+  const editor = serviceOf(ctx, 'configEditor');
+  try {
+    for (const item of (editor === undefined || typeof editor.configuration !== 'function' ? [] : editor.configuration()) || []) {
+      const entry = item && item.entry;
+      if (moduleOfEntry(entry) !== MCP_MODULE) continue;
+      if (idOfEntry(entry) !== rowId) continue;
+      const effective = { ...((item && item.inherited) || {}), ...((item && item.override) || {}) };
+      const values = effective.transport === 'streamable-http' ? effective.headers : effective.env;
+      return {
+        present: true,
+        serverName: typeof effective.serverName === 'string' ? effective.serverName : '',
+        command: typeof effective.command === 'string' ? effective.command : '',
+        envKeys: values !== null && typeof values === 'object' && !Array.isArray(values) ? Object.keys(values) : [],
+      };
+    }
+  } catch {
+    return { present: false, serverName: '', command: '', envKeys: [] };
+  }
+  return { present: false, serverName: '', command: '', envKeys: [] };
+}
+
+/** The plan, the diagnosis behind it, and what the answer says was or would be changed. */
+function repairAnswer(plan, evidence, extra) {
+  return {
+    dryRun: extra.dryRun === true,
+    slug: plan.slug,
+    action: plan.action,
+    txid: plan.txid,
+    state: evidence.diagnosis.state,
+    phase: evidence.diagnosis.phase,
+    risk: evidence.diagnosis.risk,
+    allowed: plan.allowed === true,
+    reasons: plan.reasons,
+    changes: plan.changes,
+    evidence: plan.evidence,
+    // A dry run has an outcome it *would* have; saying "discarded" before anything was discarded
+    // would be the answer claiming an effect it did not have.
+    outcome: extra.dryRun === true
+      ? (plan.outcome === 'refused' ? 'refused' : plan.outcome === 'already-completed' ? 'already-completed' : 'planned')
+      : (extra.outcome === undefined ? plan.outcome : extra.outcome),
+    pendingRestart: extra.pendingRestart === true,
+    verified: extra.verified === true,
+    live: extra.live === true,
+    diagnosis: evidence.diagnosis,
+  };
+}
 /**
  * Remove one generated bundle: the official removal first, the directory only after it.
  *
@@ -1747,4 +1924,6 @@ export function apply(ctx) {
     lockedMarketRoute(request, context, 'install', (body) => (typeof body.name === 'string' ? market.slugFor(body.name) : ''), marketInstallResponse));
   register(MARKET_UNINSTALL_PATH, ['POST'], (request, context) =>
     lockedMarketRoute(request, context, 'uninstall', (body) => (typeof body.slug === 'string' ? body.slug : ''), marketUninstallResponse));
+  // Repair takes its own lock, and a dry run must not take one at all.
+  register(MARKET_REPAIR_PATH, ['POST'], (request, context) => marketRepairResponse(request, context));
 }
