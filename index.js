@@ -1828,12 +1828,21 @@ async function marketUninstallResponse(request, ctx) {
   // DSH dropped the dependency and then reported the change as failed, so the caller retries — and
   // the retry has to say "already done" rather than "not removable" for the rest of time.
   if (declared !== true && (listed === null || listed.installed !== true)) {
+    // Nothing to detach — and the files are still there, so this is also the retry that cleans
+    // them up once the profiles that were reading them are gone.
+    const cleaned = market.retireBundle(slug, mine);
+    const removedNow = cleaned.ok === true && cleaned.retired === true;
     return json({
       ok: true,
       value: {
         slug, pkg: manifest.pkg,
         detached: true, alreadyDetached: true,
-        bundleKept: true, deleted: false, pruned: 0,
+        retired: removedNow,
+        bundleKept: !removedNow, deleted: removedNow, pruned: cleaned.pruned || [],
+        quarantineLeft: cleaned.quarantineLeft === true,
+        retireReason: cleaned.ok === true ? '' : cleaned.code,
+      retireDetail: cleaned.ok === true ? '' : String(cleaned.reason || ''),
+        retireDetail: cleaned.ok === true ? '' : String(cleaned.reason || ''),
         inUse: false,
         others,
       },
@@ -1884,15 +1893,23 @@ async function marketUninstallResponse(request, ctx) {
   if (stillMine.length > 0) {
     return failure('uninstall-not-confirmed', 'the profile still declares this bundle after the installer reported removing it', 500);
   }
+  // Detached. Now the files: only the two conditions above make that safe, and both are checked
+  // again here rather than assumed from the state we read before the installer ran.
+  const cleaned = market.retireBundle(slug, mine);
+  const removedNow = cleaned.ok === true && cleaned.retired === true;
   return json({
     ok: true,
     value: {
       slug, pkg: manifest.pkg,
       detached: true,
+      retired: removedNow,
+      bundleKept: !removedNow, deleted: removedNow, pruned: cleaned.pruned || [],
+      quarantineLeft: cleaned.quarantineLeft === true,
+      retireReason: cleaned.ok === true ? '' : cleaned.code,
+      retireDetail: cleaned.ok === true ? '' : String(cleaned.reason || ''),
       alreadyDetached: false,
       inUse: false,
       // The bundle directory is left where it is: this round detaches and does not retire.
-      bundleKept: true, deleted: false, pruned: 0,
       application: removed !== null && removed !== undefined && typeof removed.application === 'string' ? removed.application : '',
       others,
       referencesUnknown: before.ok !== true,

@@ -260,9 +260,8 @@ test('a single profile that owns the bundle can uninstall it', async () => {
   assert.equal(removed.status, 200);
   assert.deepEqual(calls.remove, [pkg()], 'the official removal is the one that runs');
   assert.equal(removed.body.value.detached, true);
-  assert.equal(removed.body.value.bundleKept, true);
-  assert.equal(existsSync(bundleDir()), true, 'and the directory stays: detaching is not retiring');
-  assert.equal(readFileSync(join(bundleDir(), 'cordis.patch.yml'), 'utf8'), PATCH, 'byte for byte');
+  assert.equal(removed.body.value.retired, true);
+  assert.equal(existsSync(bundleDir()), false, 'and with nobody else reading it, the files go');
 });
 
 test('a single profile that owns the bundle can update it', async () => {
@@ -305,5 +304,5 @@ test('a silent profile directory is not a reference at all', async () => {
   assert.equal(removed.status, 200, 'directories that say nothing about this bundle do not block it');
   assert.deepEqual(calls.remove, [pkg()]);
   assert.equal(removed.body.value.others.length, 0, 'and nothing else is reported as reading it');
-  assert.equal(existsSync(bundleDir()), true);
+  assert.equal(existsSync(bundleDir()), false, 'so its files go too');
 });

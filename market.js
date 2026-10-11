@@ -2077,6 +2077,73 @@ export function stagingPathProblem(slug, dir) {
 }
 
 /** Delete one generated bundle directory. */
+/**
+ * Take a bundle's files away, once nothing can be reading them.
+ *
+ * Detaching removes a dependency; this removes the bytes. It runs only when both can be shown:
+ * no other profile references the directory, and its content is still exactly what the transaction
+ * that wrote it recorded. Anything else leaves the files where they are — a directory that cannot
+ * be proven to be ours is not one to delete, and a directory someone else reads is not either.
+ *
+ * The move comes first and the deletion second, so a failure at any point leaves the bundle either
+ * where it was or in quarantine — never half-removed.
+ *
+ * @returns `{ok: true, retired, pruned, quarantineLeft}` or `{ok: false, code, reason}`.
+ */
+export function retireBundle(slug, ours = null) {
+  const name = String(slug === undefined || slug === null ? '' : slug);
+  if (!SLUG_PATTERN.test(name)) {
+    return { ok: false, code: 'retire-unknown', reason: `${name.slice(0, 40)} is not a slug, so its files are not touched` };
+  }
+  const references = bundleReferences(name, ours);
+  if (references.ok !== true || references.ownership !== 'known') {
+    return { ok: false, code: 'retire-references-unknown', reason: references.ok === true ? 'the host did not say which profile this is' : references.reason };
+  }
+  const others = references.references.filter((item) => item.current !== true);
+  if (others.length > 0) {
+    return { ok: false, code: 'retire-shared', reason: 'another profile is still reading these files', others };
+  }
+  const dir = bundleDir(name);
+  let info;
+  try {
+    info = lstatSync(dir);
+  } catch (error) {
+    if (error.code === 'ENOENT') return { ok: true, retired: false, code: '', pruned: [], quarantineLeft: false };
+    return { ok: false, code: 'retire-inspect-failed', reason: `the bundle directory could not be inspected (${String(error.code)})` };
+  }
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    return { ok: false, code: 'retire-not-a-directory', reason: 'the bundle path is not a directory this plugin wrote' };
+  }
+  const content = tx.verifyBundleContent(dir);
+  if (content.ok !== true) {
+    return { ok: false, code: 'retire-content-unreadable', reason: content.reason || 'the content could not be read' };
+  }
+  // A bundle installed before digests existed has nothing to compare against, and the manifest
+  // naming the directory is still this plugin's own record of what it put there — refusing those
+  // would mean the earliest installs could never be cleaned up. A recorded digest that no longer
+  // matches is the different case: that content changed after it was written, and it stays.
+  if (content.verifiable === true && content.matches !== true) {
+    return { ok: false, code: 'retire-content-changed', reason: 'the content changed since it was installed, so it is not deleted' };
+  }
+  const quarantineRoot = join(MARKET_ROOT, '.tx', name, 'quarantine');
+  const quarantine = join(quarantineRoot, 'retire-' + Date.now().toString(36));
+  try {
+    mkdirSync(quarantineRoot, { recursive: true });
+    renameSync(dir, quarantine);
+  } catch (error) {
+    return { ok: false, code: 'retire-move-failed', reason: `the bundle could not be moved aside (${String((error && error.code) || error)})` };
+  }
+  const pruned = pruneBundleLinks(name);
+  let quarantineLeft = false;
+  try {
+    rmSync(quarantine, { recursive: true, force: true });
+  } catch {
+    quarantineLeft = true;
+  }
+  if (existsSync(quarantine)) quarantineLeft = true;
+  return { ok: true, retired: true, code: '', pruned, quarantineLeft, contentVerified: content.verifiable === true && content.matches === true };
+}
+
 export function removeBundleDir(slug) {
   const dir = bundleDir(slug);
   if (!existsSync(dir)) return false;

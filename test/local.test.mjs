@@ -322,13 +322,12 @@ test('uninstalling a local entry takes the same path as a registry one', async (
   const body = await response.json();
   assert.deepEqual(calls.remove, ['@dsh-mcp-market/' + slug], 'the official removal is the one that runs');
   assert.equal(body.value.detached, true);
-  assert.equal(body.value.bundleKept, true, 'and the bundle is kept, not deleted');
-  assert.equal(body.value.deleted, false);
-  assert.equal(body.value.pruned, 0, 'nothing is pruned: the link is not dead while the bundle is there');
-  assert.equal(existsSync(market.bundleDir(slug)), true, 'the bundle directory stays');
-  assert.equal(readFileSync(join(market.bundleDir(slug), 'market.meta.json'), 'utf8').includes('vendor.example/notes'), true, 'with its bytes intact');
-  assert.equal(market.listInstalled().length, 1, 'and it is still known');
-  assert.equal(existsSync(join(scope, slug)), true, 'the junction is left where it was');
+  assert.equal(body.value.retired, true, 'and nothing is left reading it, so the files go');
+  assert.equal(body.value.deleted, true);
+  assert.equal(body.value.pruned.length, 1, 'the link it left behind is dead now, and is cleaned up');
+  assert.equal(existsSync(market.bundleDir(slug)), false, 'the bundle directory is gone');
+  assert.equal(market.listInstalled().length, 0, 'and it is forgotten');
+  assert.equal(existsSync(join(scope, slug)), false, 'and the junction goes with it');
 });
 
 test('an entry whose values are all declared installs without a form', async () => {

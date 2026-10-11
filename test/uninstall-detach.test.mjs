@@ -177,12 +177,13 @@ test('[contract] a profile detaches its own dependency and keeps the physical bu
 
   assert.equal(done.status, 200, JSON.stringify(done.body));
   assert.equal(done.body.value.detached, true);
-  assert.equal(done.body.value.bundleKept, true, 'this round does not delete the bundle');
-  assert.equal(done.body.value.deleted, false);
+  assert.equal(done.body.value.retired, true, 'and with nothing else reading it, the files go too (' + done.body.value.retireReason + ' / ' + done.body.value.retireDetail + ')');
+  assert.equal(done.body.value.deleted, true);
+  assert.equal(done.body.value.bundleKept, false);
   assert.deepEqual(profileManifest('desktop').dsh.profile.bundles, [], 'the profile no longer loads it');
   assert.deepEqual(Object.keys(profileManifest('desktop').dependencies), [], 'and no longer depends on it');
-  assert.equal(existsSync(bundleDir()), true, 'while the bundle itself is still there');
-  assert.equal(readFileSync(join(bundleDir(), 'cordis.patch.yml'), 'utf8'), '# patch\n', 'byte for byte');
+  assert.equal(existsSync(bundleDir()), false, 'the directory is gone');
+  assert.equal(readdirSync(join(bundleDir(), '..')).includes(slug), false, 'and nothing of it is left in the market root');
 });
 
 test('[contract] another profile that shares the bundle is not touched', async () => {
@@ -274,9 +275,8 @@ test('[contract] nothing left to detach is reported as already done, not as a fa
   assert.equal(done.status, 200, JSON.stringify(done.body));
   assert.equal(done.body.value.detached, true);
   assert.equal(done.body.value.alreadyDetached, true, 'there was nothing to do, and that is said');
-  assert.equal(done.body.value.bundleKept, true);
-  assert.equal(done.body.value.deleted, false);
-  assert.equal(existsSync(bundleDir()), true, 'the bundle is kept');
+  assert.equal(done.body.value.retired, true, 'and the retry cleans up the files the first attempt left');
+  assert.equal(existsSync(bundleDir()), false);
   assert.deepEqual(fingerprint(join(PROFILES, 'desktop')), before, 'and the profile is not touched');
 });
 
@@ -307,6 +307,5 @@ test('[contract] the listing says whether this profile still uses the bundle', a
   assert.equal(done.status, 200, JSON.stringify(done.body));
 
   const after = await call(routes, host.MARKET_INSTALLED_PATH, {});
-  assert.equal(after.body.value.items.length, 1, 'the bundle is still listed: its files are still there');
-  assert.equal(after.body.value.items[0].inUse, false, 'but this profile no longer uses it');
+  assert.equal(after.body.value.items.length, 0, 'and with the files gone it leaves the list entirely');
 });

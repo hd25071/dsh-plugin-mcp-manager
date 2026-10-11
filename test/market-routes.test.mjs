@@ -206,16 +206,14 @@ test('uninstall removes the bundle first and the directory after', async () => {
   assert.equal(removed.status, 200, JSON.stringify(removed.body));
   assert.deepEqual(calls.remove, [market.BUNDLE_PREFIX + slug]);
   assert.equal(removed.body.value.detached, true);
-  assert.equal(removed.body.value.bundleKept, true);
-  assert.equal(removed.body.value.deleted, false);
-  assert.equal(existsSync(installed.body.value.dir), true, 'the installed bundle is still there');
-  assert.equal(market.listInstalled().length, 1, 'and still known: what left is the profile dependency');
+  assert.equal(removed.body.value.retired, true);
+  assert.equal(removed.body.value.deleted, true);
+  assert.equal(existsSync(installed.body.value.dir), false, 'the installed bundle is gone');
+  assert.equal(market.listInstalled().length, 0, 'and it is forgotten');
 
-  // Asked again, the bundle is still known, so the route does not report it as missing. The fake
-  // always answers applied, so this says nothing about how a real second removal behaves.
+  // Asked again there is nothing to find: the bundle is gone, not merely detached.
   const again = await call(routes, host.MARKET_UNINSTALL_PATH, host.MARKET_UNINSTALL_PATH, post({ slug }));
-  assert.equal(again.status, 200, JSON.stringify(again.body));
-  assert.equal(again.body.value.bundleKept, true);
+  assert.equal(again.status, 404, JSON.stringify(again.body));
 });
 
 test('without the plugin manager the install routes degrade instead of throwing', async () => {
