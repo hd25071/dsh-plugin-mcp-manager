@@ -230,6 +230,10 @@ const FILES = ['cordis.patch.yml', 'market.meta.json', 'package.json'];
 
 // --- [defect] a recovery may never leave a half-removed published bundle ------------------------
 
+function publishedListing() {
+  return existsSync(bundleDir()) ? readdirSync(bundleDir()).sort() : [];
+}
+
 test('[defect] a failed restore must not already have destroyed the published version', async () => {
   seedPublishedUpdate();
   const { routes } = makeCtx({ installed: true });
