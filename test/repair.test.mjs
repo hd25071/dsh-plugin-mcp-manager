@@ -12,7 +12,7 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
@@ -162,6 +162,31 @@ function writeBundle(dir, options = {}) {
 }
 
 /** The same three files in a staging or backup directory, without touching the published one. */
+/**
+ * The previous version, produced the way an update produces one: it is published at the canonical
+ * path first, and then the directory is *moved* into the backup slot. A rename rewrites nothing, so
+ * the manifest inside still names the path it was published at — which is the whole point, because
+ * a manifest rendered straight into \`backup/<txid>\` would name the backup path instead and every
+ * comparison against it would be comparing a configuration that never existed.
+ *
+ * Any bundle that happens to be published already is held aside and put back, so a fixture can call
+ * this in either order without losing the version under test.
+ */
+function movePublishedIntoBackup(backupTxid, options = {}) {
+  const held = join(txRoot(), 'held-while-rendering');
+  const hadPublished = existsSync(bundleDir());
+  if (hadPublished) {
+    mkdirSync(dirname(held), { recursive: true });
+    renameSync(bundleDir(), held);
+  }
+  const meta = writeBundle(bundleDir(), { txid: backupTxid, ...options });
+  mkdirSync(dirname(backupDir(backupTxid)), { recursive: true });
+  rmSync(backupDir(backupTxid), { recursive: true, force: true });
+  renameSync(bundleDir(), backupDir(backupTxid));
+  if (hadPublished) renameSync(held, bundleDir());
+  return meta;
+}
+
 function writeDirectoryWithBundle(dir, options = {}) {
   return writeBundle(dir, options);
 }
@@ -378,7 +403,7 @@ test('[contract] discarding twice is idempotent and the second call says so', as
 test('[contract] an update with a verifiable backup and a missing published directory is restored', async () => {
   seedCache();
   seedProfile('desktop', { declares: true });
-  writeDirectoryWithBundle(backupDir('tx-mid'), { txid: 'tx-prev', tag: 'v1' });
+  movePublishedIntoBackup('tx-mid', { txid: 'tx-prev', tag: 'v1' });
   writeJournal(journalRecord('tx-mid', 'BACKED_UP'));
   const { routes, calls } = makeCtx({ installed: true });
   assert.equal(existsSync(bundleDir()), false, 'the published directory is the thing that is missing');
@@ -397,7 +422,7 @@ test('[contract] an update with a verifiable backup and a missing published dire
 test('[contract] a backup that does not match its own digest is not restored', async () => {
   seedCache();
   seedProfile('desktop', { declares: true });
-  writeDirectoryWithBundle(backupDir('tx-mid'), { txid: 'tx-prev', tag: 'v1' });
+  movePublishedIntoBackup('tx-mid', { txid: 'tx-prev', tag: 'v1' });
   writeFileSync(join(backupDir('tx-mid'), 'cordis.patch.yml'), patchFor('tampered'), 'utf8');
   writeJournal(journalRecord('tx-mid', 'BACKED_UP'));
   const { routes } = makeCtx({ installed: true });
@@ -414,7 +439,7 @@ test('[contract] a published directory claiming another transaction is never rep
   seedCache();
   seedProfile('desktop', { declares: true });
   writeBundle(bundleDir(), { txid: 'tx-someone-else', tag: 'v9' });
-  writeDirectoryWithBundle(backupDir('tx-mine'), { txid: 'tx-prev', tag: 'v1' });
+  movePublishedIntoBackup('tx-mine', { txid: 'tx-prev', tag: 'v1' });
   writeJournal(journalRecord('tx-mine', 'BACKED_UP'));
   const { routes } = makeCtx({ installed: true });
   const before = fingerprint(home);
@@ -430,7 +455,7 @@ test('[contract] a published directory claiming another transaction is never rep
 test('[contract] a rollback the profile would contradict is refused, not attempted', async () => {
   seedCache();
   seedProfile('desktop');
-  writeDirectoryWithBundle(backupDir('tx-mid'), { txid: 'tx-prev', tag: 'v1' });
+  movePublishedIntoBackup('tx-mid', { txid: 'tx-prev', tag: 'v1' });
   writeJournal(journalRecord('tx-mid', 'BACKED_UP'));
   const { routes } = makeCtx({ installed: false });
   const before = fingerprint(home);
@@ -446,7 +471,7 @@ test('[contract] a rollback the profile would contradict is refused, not attempt
 test('[contract] an unreadable profile fails closed instead of guessing', async () => {
   seedCache();
   seedProfile('desktop');
-  writeDirectoryWithBundle(backupDir('tx-mid'), { txid: 'tx-prev', tag: 'v1' });
+  movePublishedIntoBackup('tx-mid', { txid: 'tx-prev', tag: 'v1' });
   writeJournal(journalRecord('tx-mid', 'BACKED_UP'));
   const { routes } = makeCtx({ unreadable: true });
   const before = fingerprint(home);
@@ -461,7 +486,7 @@ test('[contract] an unreadable profile fails closed instead of guessing', async 
 test('[contract] a rollback that fails halfway keeps the backup and the journal', async () => {
   seedCache();
   seedProfile('desktop', { declares: true });
-  writeDirectoryWithBundle(backupDir('tx-mid'), { txid: 'tx-prev', tag: 'v1' });
+  movePublishedIntoBackup('tx-mid', { txid: 'tx-prev', tag: 'v1' });
   writeJournal(journalRecord('tx-mid', 'BACKED_UP'));
   const { routes } = makeCtx({ installed: true });
   process.env.MCP_MARKET_FAULT = 'repair-restore';
@@ -480,7 +505,7 @@ test('[contract] a rollback that fails halfway keeps the backup and the journal'
 test('[contract] retrying a stuck recovery re-checks everything before trying again', async () => {
   seedCache();
   seedProfile('desktop', { declares: true });
-  writeDirectoryWithBundle(backupDir('tx-mid'), { txid: 'tx-prev', tag: 'v1' });
+  movePublishedIntoBackup('tx-mid', { txid: 'tx-prev', tag: 'v1' });
   writeJournal(journalRecord('tx-mid', 'NEEDS_ATTENTION', { intent: 'restore-failed' }));
   const { routes } = makeCtx({ installed: true });
 
@@ -646,7 +671,7 @@ test('[contract] an action that would disturb another profile\'s bundle is refus
   mkdirSync(other, { recursive: true });
   writeFileSync(join(other, 'package.json'), JSON.stringify({ name: 'dsh-profile-laptop', dependencies: {}, dsh: { profile: { bundles: [pkg] } } }), 'utf8');
   writeBundle(bundleDir(), { txid: 'tx-ours', tag: 'v2' });
-  writeDirectoryWithBundle(backupDir('tx-ours'), { txid: 'tx-prev', tag: 'v1' });
+  movePublishedIntoBackup('tx-ours', { txid: 'tx-prev', tag: 'v1' });
   writeJournal(journalRecord('tx-ours', 'PUBLISHED'));
   const { routes } = makeCtx({ installed: true });
   const before = fingerprint(home);
@@ -685,7 +710,7 @@ test('[contract] a file another process holds open never leaves a half-removed r
   seedCache();
   seedProfile('desktop', { declares: true });
   writeBundle(bundleDir(), { txid: 'tx-mine', tag: 'v2' });
-  writeDirectoryWithBundle(backupDir('tx-mine'), { txid: 'tx-prev', tag: 'v1' });
+  movePublishedIntoBackup('tx-mine', { txid: 'tx-prev', tag: 'v1' });
   writeJournal(journalRecord('tx-mine', 'PUBLISHED'));
   const held = join(bundleDir(), 'cordis.patch.yml');
   const holder = spawn('powershell', ['-NoProfile', '-Command',
@@ -703,8 +728,11 @@ test('[contract] a file another process holds open never leaves a half-removed r
       assert.equal(readFileSync(join(bundleDir(), 'cordis.patch.yml'), 'utf8'), patchFor('v1'), 'and the previous version is the published one');
       assert.equal(existsSync(journalPath()), false);
     } else {
-      assert.equal(answer.body.error.code, 'needs-attention');
-      assert.equal(readJournal().phase, 'NEEDS_ATTENTION');
+      assert.equal(['repair-refused', 'needs-attention'].includes(answer.body.error.code), true,
+        'a refusal must leave everything where it is: ' + JSON.stringify(answer.body.error.code));
+      // A file opened without sharing cannot even be read, so the content check refuses before any
+      // directory is touched; one that can be read but not moved fails after the intent is recorded.
+      if (answer.body.error.code === 'needs-attention') assert.equal(readJournal().phase, 'NEEDS_ATTENTION');
       assert.equal(readFileSync(join(backupDir('tx-mine'), 'cordis.patch.yml'), 'utf8'), patchFor('v1'),
         'the previous version is still the only copy, and it is still there');
     }
@@ -720,7 +748,7 @@ test('[contract] a quarantine that fails keeps the published directory, the back
   seedCache();
   seedProfile('desktop', { declares: true });
   const published = writeBundle(bundleDir(), { txid: 'tx-mine', tag: 'v2' });
-  writeDirectoryWithBundle(backupDir('tx-mine'), { txid: 'tx-prev', tag: 'v1' });
+  movePublishedIntoBackup('tx-mine', { txid: 'tx-prev', tag: 'v1' });
   writeJournal(journalRecord('tx-mine', 'PUBLISHED'));
   const { routes } = makeCtx({ installed: true });
   process.env.MCP_MARKET_FAULT = 'repair-quarantine';

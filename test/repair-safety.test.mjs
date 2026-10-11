@@ -157,6 +157,31 @@ function writeBundle(dir, options = {}) {
   return meta;
 }
 
+/**
+ * The previous version, produced the way an update produces one: it is published at the canonical
+ * path first, and then the directory is *moved* into the backup slot. A rename rewrites nothing, so
+ * the manifest inside still names the path it was published at — which is the whole point, because
+ * a manifest rendered straight into \`backup/<txid>\` would name the backup path instead and every
+ * comparison against it would be comparing a configuration that never existed.
+ *
+ * Any bundle that happens to be published already is held aside and put back, so a fixture can call
+ * this in either order without losing the version under test.
+ */
+function movePublishedIntoBackup(backupTxid, options = {}) {
+  const held = join(txRoot(), 'held-while-rendering');
+  const hadPublished = existsSync(bundleDir());
+  if (hadPublished) {
+    mkdirSync(dirname(held), { recursive: true });
+    renameSync(bundleDir(), held);
+  }
+  const meta = writeBundle(bundleDir(), { txid: backupTxid, ...options });
+  mkdirSync(dirname(backupDir(backupTxid)), { recursive: true });
+  rmSync(backupDir(backupTxid), { recursive: true, force: true });
+  renameSync(bundleDir(), backupDir(backupTxid));
+  if (hadPublished) renameSync(held, bundleDir());
+  return meta;
+}
+
 const journalRecord = (id, phase, extra = {}) => ({
   schema: 1, txid: id, slug, operation: 'install', phase, intent: 'test',
   expected: { rowId, serverName: 'notes' },
@@ -220,7 +245,7 @@ function seedPublishedUpdate(options = {}) {
   seedCache();
   seedProfile('desktop', { declares: true });
   const published = writeBundle(bundleDir(), { txid: 'tx-mine', tag: 'v2', ...options.published });
-  writeBundle(backupDir('tx-mine'), { txid: 'tx-prev', tag: 'v1', ...options.backup });
+  movePublishedIntoBackup('tx-mine', { txid: 'tx-prev', tag: 'v1', ...options.backup });
   writeJournal(journalRecord('tx-mine', 'PUBLISHED'));
   return published;
 }
@@ -296,7 +321,7 @@ test('[contract] a crash between the two renames is diagnosed, not mistaken for 
   seedCache();
   seedProfile('desktop', { declares: true });
   writeBundle(bundleDir(), { txid: 'tx-mine', tag: 'v2' });
-  writeBundle(backupDir('tx-mine'), { txid: 'tx-prev', tag: 'v1' });
+  movePublishedIntoBackup('tx-mine', { txid: 'tx-prev', tag: 'v1' });
   // Exactly what a crash between the renames leaves: the published version moved aside, the backup
   // still waiting, and a journal that says the quarantine step was the one under way.
   mkdirSync(dirname(quarantineDir('tx-mine')), { recursive: true });
