@@ -1821,7 +1821,27 @@ async function marketUninstallResponse(request, ctx) {
   // answer is what `application` says — the same judgement the install path makes.
   const outcome = market.installOutcome(removed);
   if (outcome.ok !== true) {
-    return failure('uninstall-not-applied', `the installer did not remove the bundle: ${outcome.code}`, 502);
+    // The manager's own words are the only useful part of this refusal: it knows whether it
+    // refused because the bundle is not removable, because pnpm failed, or because a bundle that
+    // is currently running cannot be unloaded without a restart. Reporting one word — which said
+    // 'install-…' on an uninstall — hid all three, and the real first attempt produced exactly
+    // that: a 502 whose message told nobody what to do next.
+    const detail = [outcome.errorCode, outcome.diagnostic, outcome.failedAt]
+      .filter((part) => typeof part === 'string' && part !== '').join(' — ').slice(0, 400);
+    const needsRestart = /restart|started|in-use|loaded/i.test(outcome.errorCode + ' ' + outcome.diagnostic);
+    return json({
+      ok: false,
+      error: {
+        code: needsRestart ? 'uninstall-needs-restart' : 'uninstall-not-applied',
+        message: (needsRestart
+          ? 'this bundle is still running, so the installer could not remove it; restart DSH and try again — '
+          : 'the installer did not remove the bundle — ') + (detail === '' ? outcome.application : detail),
+        application: outcome.application,
+        managerCode: outcome.errorCode,
+        diagnostic: outcome.diagnostic.slice(0, 300),
+        failedAt: outcome.failedAt,
+      },
+    }, needsRestart ? 409 : 502);
   }
   // And the claim is checked rather than assumed: the profile has to have stopped declaring it.
   const after = market.bundleReferences(slug, mine);

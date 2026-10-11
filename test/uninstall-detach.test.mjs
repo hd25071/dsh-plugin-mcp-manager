@@ -235,3 +235,22 @@ test('[contract] a profile whose own state cannot be established is not detached
   assert.deepEqual(fingerprint(bundleDir()), before, 'byte for byte');
   assert.deepEqual(profileManifest('desktop').dsh.profile.bundles, [pkg], 'and the profile is untouched');
 });
+
+test('[contract] a refusal carries the manager\'s own reason instead of one word', async () => {
+  writeProfile('desktop');
+  writeBundle();
+  writeAnchor({});
+  // A bundle that is loaded cannot be unloaded without a restart, and the host says so in code:
+  // the caller has to be told which of the possible refusals this was.
+  const routes = makeCtx({ removeResult: { application: 'failed', error: { code: 'restart-required', diagnostic: 'the bundle is started' } } });
+
+  const refused = await uninstall(routes);
+
+  assert.equal(refused.status, 409, JSON.stringify(refused.body));
+  assert.equal(refused.body.error.code, 'uninstall-needs-restart');
+  assert.equal(refused.body.error.managerCode, 'restart-required', 'the manager\'s code survives');
+  assert.equal(refused.body.error.diagnostic, 'the bundle is started');
+  assert.equal(JSON.stringify(refused.body).includes('install-failed'), false, 'and nothing calls this an install');
+  assert.equal(existsSync(bundleDir()), true, 'the bundle is untouched');
+  assert.deepEqual(profileManifest('desktop').dsh.profile.bundles, [pkg], 'and so is the profile');
+});
