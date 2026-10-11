@@ -1802,7 +1802,13 @@ function marketInstalledResponse(ctx) {
     const live = stateOfRow(ctx, manifest, toolNames);
     // The manifest also carries the values a person typed into the argument slots, and a listing
     // is not a place to read them back out. Everything else is passed through unchanged.
-    const { argumentValues: _argumentValues, ...rest } = manifest;
+    // A whitelist rather than a spread. A manifest gains fields as the format grows, and a listing
+    // is not the place for whatever a future one adds: a digest of a low-entropy value is a guessing
+    // oracle, and configured values must never appear here at all. Only what a person is shown is
+    // carried over; recovery reads the rest from disk.
+    const carried = ['registryName', 'registryVersion', 'registryTitle', 'installedAt', 'source', 'mcpb', 'slug', 'pkg', 'rowId', 'serverName', 'kind', 'registryType', 'transport', 'command', 'args', 'url', 'configKeys', 'txid'];
+    const rest = {};
+    for (const field of carried) if (manifest[field] !== undefined) rest[field] = manifest[field];
     return {
       ...rest,
       state: live.state,

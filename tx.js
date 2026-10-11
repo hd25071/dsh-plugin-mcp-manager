@@ -351,13 +351,14 @@ export function verifyBundleContent(dir) {
   const recorded = typeof manifest.renderDigest === 'string' ? manifest.renderDigest : '';
   const whole = typeof manifest.contentDigest === 'string' ? manifest.contentDigest : '';
   const configDigest = typeof manifest.configDigest === 'string' ? manifest.configDigest : '';
+  const evidence = configEvidenceOf(manifest);
   if (whole !== '') {
     const scanned = digestDirectory(dir);
     if (scanned.ok !== true) {
-      return { ok: false, readable: true, txid, configDigest, coverage: 'unverifiable', verifiable: false, matches: false, reason: scanned.reason };
+      return { ok: false, readable: true, txid, configDigest, ...evidence, coverage: 'unverifiable', verifiable: false, matches: false, reason: scanned.reason };
     }
     return {
-      ok: true, readable: true, txid, configDigest, recorded: whole, actual: scanned.digest, coverage: 'whole-bundle',
+      ok: true, readable: true, txid, configDigest, ...evidence, recorded: whole, actual: scanned.digest, coverage: 'whole-bundle',
       verifiable: true, matches: scanned.digest === whole,
       reason: scanned.digest === whole ? '' : 'the bundle contains files that are not the ones this transaction wrote',
     };
@@ -365,7 +366,7 @@ export function verifyBundleContent(dir) {
   if (recorded === '') {
     // Written before the digest existed: its content cannot be checked, which is a different answer
     // from "it is fine" and must not be read as one.
-    return { ok: true, readable: true, txid, configDigest, recorded: '', coverage: 'none', verifiable: false, matches: false, reason: 'the manifest records no digest, so this content cannot be verified' };
+    return { ok: true, readable: true, txid, configDigest, ...evidence, recorded: '', coverage: 'none', verifiable: false, matches: false, reason: 'the manifest records no digest, so this content cannot be verified' };
   }
   let manifestJson;
   let patch;
@@ -373,14 +374,14 @@ export function verifyBundleContent(dir) {
     manifestJson = readFileSync(join(dir, 'package.json'), 'utf8');
     patch = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8');
   } catch (error) {
-    return { ok: false, readable: true, txid, configDigest, recorded, reason: 'the rendered files could not be read (' + String((error && error.code) || error) + ')' };
+    return { ok: false, readable: true, txid, configDigest, ...evidence, recorded, reason: 'the rendered files could not be read (' + String((error && error.code) || error) + ')' };
   }
   const actual = digestOf({ 'package.json': manifestJson, 'cordis.patch.yml': patch });
   // Only the two rendered files are covered by an older digest. Anything else in the directory —
   // an mcpb payload above all — is not, and the caller is told so rather than reassured.
   const extra = readdirSync(dir).filter((name) => name !== 'package.json' && name !== 'cordis.patch.yml' && name !== 'market.meta.json');
   return {
-    ok: true, readable: true, txid, configDigest, recorded, actual, coverage: 'rendered-only', verifiable: true,
+    ok: true, readable: true, txid, configDigest, ...evidence, recorded, actual, coverage: 'rendered-only', verifiable: true,
     matches: actual === recorded, unchecked: extra,
     reason: actual === recorded ? '' : 'the rendered files are not the ones this transaction wrote',
   };
@@ -456,11 +457,15 @@ export function configSummaryOf(input) {
   const map = chosen === null || chosen === undefined || typeof chosen !== 'object' ? {} : chosen;
   const names = Object.keys(map).sort();
   const normalized = [];
+  const collisions = [];
   const pairs = [];
   for (const key of names) {
     // What is digested and what is reported are the same names, folded or not, so a reader of the
     // summary sees exactly the keys the digest was taken over.
     const name = namespace === 'headers' ? String(key).toLowerCase() : String(key);
+    // Two spellings of one header fold to one name. Both values stay in the digest — nothing is
+    // dropped — but the ambiguity is reported rather than quietly resolved.
+    if (normalized.includes(name)) collisions.push(name);
     normalized.push(name);
     pairs.push(frameValue(name));
     pairs.push(frameValue(map[key]));
@@ -479,7 +484,7 @@ export function configSummaryOf(input) {
   ];
   const hash = createHash('sha256');
   for (const part of parts) hash.update(part + '\u0000');
-  return { version: CONFIG_DIGEST_VERSION, namespace, argv, configuredKeys: normalized, digest: hash.digest('hex') };
+  return { version: CONFIG_DIGEST_VERSION, namespace, argv, configuredKeys: normalized, collisions, digest: hash.digest('hex') };
 }
 
 /** How much of a bundle this reader is willing to look at before calling it too big to verify. */
@@ -546,6 +551,37 @@ export function digestDirectory(dir, options = {}) {
     hash.update('\u0000');
   }
   return { ok: true, digest: hash.digest('hex'), files: files.map(([name]) => name) };
+}
+
+/** A digest is 64 lower-case hex characters; anything else is not a digest this code wrote. */
+const DIGEST_PATTERN = /^[0-9a-f]{64}$/;
+
+/**
+ * What a manifest records about its configuration, read without trusting any of it.
+ *
+ * The status is the point. A missing field is not a match, a damaged field is not a match, and a
+ * version this code does not implement is not a match either — each is named so that a caller
+ * cannot mistake silence for agreement:
+ *
+ *   v2                   present, version 2, well formed
+ *   unsupported-version  present, but a version this code does not compare
+ *   damaged              present, but not a digest this code could have written
+ *   v1-only              no version 2 evidence, an older version 1 digest
+ *   absent               neither
+ */
+export function configEvidenceOf(manifest) {
+  const record = manifest !== null && typeof manifest === 'object' ? manifest : {};
+  const raw = record.configDigestV2 === undefined ? '' : record.configDigestV2;
+  const version = Number.isInteger(record.configDigestVersion) ? record.configDigestVersion : 0;
+  const namespace = typeof record.configNamespace === 'string' ? record.configNamespace : '';
+  const v1 = typeof record.configDigest === 'string' && record.configDigest !== '' ? record.configDigest : '';
+  const present = typeof raw === 'string' && raw !== '';
+  let status;
+  if (!present) status = v1 === '' ? 'absent' : 'v1-only';
+  else if (!DIGEST_PATTERN.test(raw) || (namespace !== 'env' && namespace !== 'headers')) status = 'damaged';
+  else if (version !== CONFIG_DIGEST_VERSION) status = 'unsupported-version';
+  else status = 'v2';
+  return { configDigestV2: present ? raw : '', configDigestVersion: present ? version : 0, configNamespace: present ? namespace : '', configEvidence: status };
 }
 
 /** The transaction id a published bundle's own manifest claims, or an empty string. */
@@ -747,6 +783,7 @@ export function readLiveBundle(bundleDir) {
     renderDigest: typeof manifest.renderDigest === 'string' ? manifest.renderDigest : '',
     configDigest: typeof manifest.configDigest === 'string' ? manifest.configDigest : '',
     contentDigest: typeof manifest.contentDigest === 'string' ? manifest.contentDigest : '',
+    ...configEvidenceOf(manifest),
     // Names, never values: the manifest also holds what a person typed into the argument slots, and
     // a diagnostic answer is not the place to read that back out.
     configKeys: Array.isArray(manifest.configKeys) ? manifest.configKeys.filter((key) => typeof key === 'string') : [],

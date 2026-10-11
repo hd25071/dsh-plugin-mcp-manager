@@ -1952,6 +1952,15 @@ export function writeBundle({ slug, rowId = '', server, serverName, plan, args, 
   // configuration is the one this transaction rendered.
   const envValues = {};
   for (const key of envKeys) envValues[key] = config[key];
+  // The same rendered configuration, summarised the version 2 way: what actually went into the
+  // patch, not the registry's plan data, and never re-derived from wherever the bundle sits now.
+  const summary = tx.configSummaryOf({
+    transport: plan.transport,
+    command: plan.kind === 'stdio' ? plan.command : null,
+    args: plan.kind === 'stdio' ? args || [] : [],
+    env: plan.transport === 'streamable-http' ? null : config || {},
+    headers: plan.transport === 'streamable-http' ? config || {} : null,
+  });
   const scanned = tx.digestDirectory(target, { exclude: ['market.meta.json'] });
   const wholeDigest = scanned.ok === true ? scanned.digest : '';
   writeFileSync(join(target, 'market.meta.json'), `${JSON.stringify({
@@ -1982,6 +1991,12 @@ export function writeBundle({ slug, rowId = '', server, serverName, plan, args, 
     // keeping a copy of them.
     contentDigest: wholeDigest === '' ? null : wholeDigest,
     configDigest: tx.configDigestOf(envValues),
+    // A second, versioned summary beside the first. The older field keeps its meaning exactly; a
+    // reader that does not know this one still reads that one, and a reader that finds this one
+    // damaged treats it as no evidence rather than as agreement.
+    configDigestV2: summary.digest,
+    configDigestVersion: summary.version,
+    configNamespace: summary.namespace,
   }, null, 2)}\n`, 'utf8');
   return { slug, dir: target, pkg, rowId: identity, txid, renderDigest };
 }
