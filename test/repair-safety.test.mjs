@@ -12,6 +12,8 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+
+import { configDigestOf, writeBundleFiles } from './helpers/bundle-fixture.mjs';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
@@ -106,22 +108,8 @@ function seedProfile(name, { declares = false } = {}) {
   return dir;
 }
 
-/**
- * The scheme the manifest's \`configDigest\` is defined as: sha256 over sorted \`key\0value\0\` pairs.
- *
- * Written out here rather than imported, so this file does not depend on the function under test —
- * a fixture that calls the code it is checking proves nothing about it.
- */
-function configDigestOf(values) {
-  const hash = createHash('sha256');
-  for (const key of Object.keys(values).sort()) {
-    hash.update(key);
-    hash.update('\u0000');
-    hash.update(String(values[key]));
-    hash.update('\u0000');
-  }
-  return hash.digest('hex');
-}
+// The version 1 scheme and the bundle writer live in test/helpers/bundle-fixture.mjs, so that the
+// bundle these cases build is the same one test/fixture-v2.test.mjs checks the properties of.
 
 const patchFor = (tag) => '# ' + tag + '\n- insert:\n    - id: ' + rowId + '\n      name: \'@deepseek-ai/dsh-mcp-client\'\n      config:\n        serverName: notes\n';
 const API_KEY = 'sk-alpha';
@@ -132,29 +120,13 @@ const OTHER_API_KEY = 'sk-beta';
  * digest, and a digest of the configured values that does not store them.
  */
 function writeBundle(dir, options = {}) {
-  const { txid = 'tx-test', tag = 'v1', apiKey = API_KEY, payload = null, legacy = false } = options;
-  mkdirSync(dir, { recursive: true });
-  const manifest = json({ name: pkg, version: '1.0.0' });
-  const patch = patchFor(tag);
-  const files = { 'package.json': manifest, 'cordis.patch.yml': patch };
-  if (payload !== null) {
-    mkdirSync(join(dir, 'mcpb', 'extracted'), { recursive: true });
-    writeFileSync(join(dir, 'mcpb', 'package.mcpb'), payload, 'utf8');
-  }
-  const meta = {
-    registryName: ENTRY, registryVersion: '1.0.0', installedAt: '2026-01-01T00:00:00Z', source: 'registry',
-    slug, pkg, rowId, serverName: 'notes', kind: 'stdio', transport: 'stdio', command: 'node',
-    args: [join(dir, 'server.js')], argumentValues: {}, configKeys: ['API_KEY'],
-    txid, renderDigest: tx.digestOf(files),
-  };
-  if (!legacy) {
-    meta.contentDigest = tx.digestOf({ ...files, ...(payload === null ? {} : { 'mcpb/package.mcpb': payload }) });
-    meta.configDigest = configDigestOf({ API_KEY: apiKey });
-  }
-  writeFileSync(join(dir, 'package.json'), manifest, 'utf8');
-  writeFileSync(join(dir, 'cordis.patch.yml'), patch, 'utf8');
-  writeFileSync(join(dir, 'market.meta.json'), json(meta), 'utf8');
-  return meta;
+  const { txid = 'tx-test', tag = 'v1', apiKey = API_KEY, payload = null, legacy = false, evidence = legacy ? 'none' : 'v2' } = options;
+  // The values the manifest was rendered with are the ones the renderer wrote into the patch, not
+  // whatever a test later puts in the running row: that difference is what several cases are about.
+  return writeBundleFiles({
+    dir, txid, tag, evidence, patch: patchFor(tag), manifestJson: json({ name: pkg, version: '1.0.0' }),
+    pkg, slug, rowId, payload, configKeys: ['API_KEY'], values: { API_KEY: apiKey },
+  });
 }
 
 /**

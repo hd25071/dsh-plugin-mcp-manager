@@ -12,6 +12,8 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+
+import { writeBundleFiles } from './helpers/bundle-fixture.mjs';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -129,13 +131,6 @@ function seedProfile(name, { declares = false } = {}) {
 }
 
 /** A distinct patch per tag, so a restore can be checked by content rather than by existence. */
-const configDigestOf = (values) => {
-  const hash = createHash('sha256');
-  for (const key of Object.keys(values).sort()) {
-    hash.update(key); hash.update('\u0000'); hash.update(String(values[key])); hash.update('\u0000');
-  }
-  return hash.digest('hex');
-};
 
 const patchFor = (tag) => '# ' + tag + '\n- insert:\n    - id: ' + rowId + '\n      name: \'@deepseek-ai/dsh-mcp-client\'\n      config:\n        serverName: notes\n';
 
@@ -144,21 +139,12 @@ const patchFor = (tag) => '# ' + tag + '\n- insert:\n    - id: ' + rowId + '\n  
  * transaction that wrote it, and a digest of exactly what it rendered.
  */
 function writeBundle(dir, options = {}) {
-  const { txid = 'tx-test', tag = 'v1' } = options;
-  mkdirSync(dir, { recursive: true });
-  const manifest = JSON.stringify({ name: pkg, version: '1.0.0' }, null, 2);
-  const patch = patchFor(tag);
-  const meta = {
-    registryName: ENTRY, registryVersion: '1.0.0', installedAt: '2026-01-01T00:00:00Z', source: 'registry',
-    slug, pkg, rowId, serverName: 'notes', kind: 'stdio', transport: 'stdio', command: 'node',
-    args: [join(dir, 'server.js')], argumentValues: {}, configKeys: ['API_TOKEN'], configDigest: configDigestOf({ API_TOKEN: 'configured' }),
-    contentDigest: tx.digestOf({ 'package.json': manifest, 'cordis.patch.yml': patch }),
-    txid, renderDigest: tx.digestOf({ 'package.json': manifest, 'cordis.patch.yml': patch }),
-  };
-  writeFileSync(join(dir, 'package.json'), manifest, 'utf8');
-  writeFileSync(join(dir, 'cordis.patch.yml'), patch, 'utf8');
-  writeFileSync(join(dir, 'market.meta.json'), JSON.stringify(meta, null, 2), 'utf8');
-  return meta;
+  const { txid = 'tx-test', tag = 'v1', evidence = 'v2' } = options;
+  // Rendered at `dir`, exactly as the product renders it, so the argv names where the bundle runs.
+  return writeBundleFiles({
+    dir, txid, tag, evidence, patch: patchFor(tag), manifestJson: JSON.stringify({ name: pkg, version: '1.0.0' }, null, 2),
+    pkg, slug, rowId, configKeys: ['API_TOKEN'], values: { API_TOKEN: 'configured' },
+  });
 }
 
 /** The same three files in a staging or backup directory, without touching the published one. */
