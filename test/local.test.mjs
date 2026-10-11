@@ -285,14 +285,27 @@ test('uninstalling a local entry takes the same path as a registry one', async (
       // The junction below is in the asking profile's own node_modules, so the host has to say which
       // profile is asking: a link this profile owns is its own residue to clean, not a shared bundle.
       if (key === 'profileContext') return { name: 'desktop', dir: join(home, '.dsh', 'profiles', 'desktop'), installAnchor: join(home, 'app', 'package.json') };
-      if (key === 'pluginManager') return { async removeBundle(name) { calls.remove.push(name); return { application: 'applied' }; } };
+      if (key === 'pluginManager') return {
+        async removeBundle(name) {
+          calls.remove.push(name);
+          // The real one rewrites this profile's configuration; a fake that only records the call
+          // leaves a state the confirmation step is right to refuse.
+          const path = join(home, '.dsh', 'profiles', 'desktop', 'package.json');
+          const manifest = JSON.parse(readFileSync(path, 'utf8'));
+          delete manifest.dependencies[name];
+          manifest.dsh.profile.bundles = (manifest.dsh.profile.bundles || []).filter((item) => item !== name);
+          writeFileSync(path, JSON.stringify(manifest), 'utf8');
+          return { application: 'applied' };
+        },
+      };
       return undefined;
     },
   };
   // The profile and the installation both have to be readable for a detach to be confirmable.
   const profileDir = join(home, '.dsh', 'profiles', 'desktop');
   mkdirSync(profileDir, { recursive: true });
-  writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-desktop', dependencies: {}, dsh: { profile: { bundles: [] } } }));
+  const declaredName = market.BUNDLE_PREFIX + market.slugFor('vendor.example/notes');
+  writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-desktop', dependencies: { [declaredName]: '1.0.0' }, dsh: { profile: { bundles: [declaredName] } } }));
   mkdirSync(join(home, 'app'), { recursive: true });
   writeFileSync(join(home, 'app', 'package.json'), JSON.stringify({ name: 'dsh-app', dependencies: {} }));
   host.apply(ctx);

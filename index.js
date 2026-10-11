@@ -1811,6 +1811,39 @@ async function marketUninstallResponse(request, ctx) {
     return json({ ok: false, error: { code: 'uninstall-references-unknown', message: 'this profile\'s references could not be established (' + why + '), so the bundle is left as it is' } }, 409);
   }
   const others = before.references.filter((item) => item.current !== true);
+  const declared = before.references.some((item) => item.current === true && item.declared === true);
+  // DSH decides what may be removed from it, so ask it rather than infer: `removeBundle` refuses
+  // anything whose `removable` is false, and `installed` is how it knows a dependency exists at all.
+  let listed = null;
+  if (typeof manager.listBundles === 'function') {
+    try {
+      const all = await manager.listBundles();
+      listed = Array.isArray(all) ? all.find((item) => item !== null && typeof item === 'object' && item.name === manifest.pkg) || null : null;
+    } catch {
+      // A listing that cannot be read says nothing either way; the declaration below still counts.
+      listed = null;
+    }
+  }
+  // Nothing left to detach is not a failure. This is the state a half-finished removal leaves:
+  // DSH dropped the dependency and then reported the change as failed, so the caller retries — and
+  // the retry has to say "already done" rather than "not removable" for the rest of time.
+  if (declared !== true && (listed === null || listed.installed !== true)) {
+    return json({
+      ok: true,
+      value: {
+        slug, pkg: manifest.pkg,
+        detached: true, alreadyDetached: true,
+        bundleKept: true, deleted: false, pruned: 0,
+        inUse: false,
+        others,
+      },
+    });
+  }
+  // It is still installed, but the installation does not allow removing it — that is a refusal,
+  // and DSH has already told us which one it is.
+  if (listed !== null && listed.installed === true && listed.removable !== true) {
+    return json({ ok: false, error: { code: 'uninstall-not-removable', message: manifest.pkg + ' is not removable in this installation' } }, 409);
+  }
   let removed;
   try {
     removed = await manager.removeBundle(manifest.pkg);
@@ -1856,6 +1889,8 @@ async function marketUninstallResponse(request, ctx) {
     value: {
       slug, pkg: manifest.pkg,
       detached: true,
+      alreadyDetached: false,
+      inUse: false,
       // The bundle directory is left where it is: this round detaches and does not retire.
       bundleKept: true, deleted: false, pruned: 0,
       application: removed !== null && removed !== undefined && typeof removed.application === 'string' ? removed.application : '',

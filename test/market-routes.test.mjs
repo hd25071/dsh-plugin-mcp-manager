@@ -81,8 +81,25 @@ function makeCtx() {
       if (key === 'profileContext') return { name: 'desktop', dir: profileDir, installAnchor: join(home, 'app', 'package.json') };
       if (key === 'pluginManager') {
         return {
-          async installBundle(spec, options) { calls.install.push({ spec, options }); return { application: 'applied' }; },
-          async removeBundle(name) { calls.remove.push(name); return { application: 'applied' }; },
+          async installBundle(spec, options) {
+            calls.install.push({ spec, options });
+            // The real one writes the dependency into the profile; the uninstall path reads it
+            // back, so a fake that skips this step models a state that cannot happen.
+            const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'));
+            const name = market.BUNDLE_PREFIX + market.slugFor('vendor.example/mcp');
+            manifest.dependencies[name] = '1.0.0';
+            manifest.dsh.profile.bundles = [...new Set([...(manifest.dsh.profile.bundles || []), name])];
+            writeFileSync(join(profileDir, 'package.json'), JSON.stringify(manifest));
+            return { application: 'applied' };
+          },
+          async removeBundle(name) {
+            calls.remove.push(name);
+            const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'));
+            delete manifest.dependencies[name];
+            manifest.dsh.profile.bundles = (manifest.dsh.profile.bundles || []).filter((item) => item !== name);
+            writeFileSync(join(profileDir, 'package.json'), JSON.stringify(manifest));
+            return { application: 'applied' };
+          },
         };
       }
       return undefined;

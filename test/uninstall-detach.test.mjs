@@ -120,7 +120,12 @@ function makeCtx(options = {}) {
             removeFrom(profile);
             return { application: 'applied' };
           },
-          listBundles() { return [{ name: pkg, installed: true, enabled: true, removable: true, rows: [{ rowId, moduleName: host.MCP_MODULE }] }]; },
+          listBundles() {
+            // DSH computes `installed` and `removable`; the fixture says what it would answer.
+            const mode = options.listed || 'installed';
+            if (mode === 'absent') return [];
+            return [{ name: pkg, installed: true, enabled: true, removable: mode !== 'not-removable', rows: [{ rowId, moduleName: host.MCP_MODULE }] }];
+          },
         };
       }
       if (key === 'configEditor') return { configuration() { return []; } };
@@ -253,4 +258,38 @@ test('[contract] a refusal carries the manager\'s own reason instead of one word
   assert.equal(JSON.stringify(refused.body).includes('install-failed'), false, 'and nothing calls this an install');
   assert.equal(existsSync(bundleDir()), true, 'the bundle is untouched');
   assert.deepEqual(profileManifest('desktop').dsh.profile.bundles, [pkg], 'and so is the profile');
+});
+
+test('[contract] nothing left to detach is reported as already done, not as a failure', async () => {
+  // The state a half-finished removal leaves: DSH dropped the dependency and reported the change as
+  // failed. Every retry afterwards has to answer honestly instead of refusing for ever.
+  writeProfile('desktop', { declares: false });
+  writeBundle();
+  writeAnchor({});
+  const routes = makeCtx({ listed: 'absent' });
+  const before = fingerprint(join(PROFILES, 'desktop'));
+
+  const done = await uninstall(routes);
+
+  assert.equal(done.status, 200, JSON.stringify(done.body));
+  assert.equal(done.body.value.detached, true);
+  assert.equal(done.body.value.alreadyDetached, true, 'there was nothing to do, and that is said');
+  assert.equal(done.body.value.bundleKept, true);
+  assert.equal(done.body.value.deleted, false);
+  assert.equal(existsSync(bundleDir()), true, 'the bundle is kept');
+  assert.deepEqual(fingerprint(join(PROFILES, 'desktop')), before, 'and the profile is not touched');
+});
+
+test('[contract] a bundle the installation refuses to remove is refused with its own verdict', async () => {
+  writeProfile('desktop');
+  writeBundle();
+  writeAnchor({});
+  const routes = makeCtx({ listed: 'not-removable' });
+
+  const refused = await uninstall(routes);
+
+  assert.equal(refused.status, 409, JSON.stringify(refused.body));
+  assert.equal(refused.body.error.code, 'uninstall-not-removable');
+  assert.equal(existsSync(bundleDir()), true, 'nothing was removed');
+  assert.deepEqual(profileManifest('desktop').dsh.profile.bundles, [pkg], 'and the profile still declares it');
 });
