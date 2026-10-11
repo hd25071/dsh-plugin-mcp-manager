@@ -747,6 +747,63 @@ function installRefused(code, message, status, { written, identity, result, veri
   }, status);
 }
 
+/** The body of a refusal that names whoever is holding the slug. */
+function lockRefusal(held) {
+  return {
+    code: held.code,
+    message: held.reason,
+    path: typeof held.path === 'string' ? held.path : '',
+    ...(held.holder === undefined ? {} : { holder: held.holder, holderAlive: held.holderAlive === true }),
+  };
+}
+
+/**
+ * Run one market mutation under its slug's global lock.
+ *
+ * Every profile under this HOME links to the SAME physical bundle directory
+ * (`MARKET_ROOT` is keyed by HOME, not by profile), and DSH's own `withFileLock` guards only the
+ * profile's `package.json` — not the bundle files this plugin writes, and not a second profile. So
+ * install, update and uninstall all take one slug lock here, before the handler runs, and give it
+ * back on every way out.
+ *
+ * The body is read here to learn which slug the request names, and handed to the handler unchanged,
+ * so the route still parses exactly what the caller sent.
+ *
+ * @param request - the incoming request.
+ * @param ctx - the plugin context.
+ * @param kind - `'install'` or `'uninstall'`, which decides the operation name.
+ * @param slugOf - reads the slug out of the parsed body.
+ * @param handler - the route being run.
+ * @returns the handler's answer, or a refusal when the slug is already being worked on.
+ */
+async function lockedMarketRoute(request, ctx, kind, slugOf, handler) {
+  let text;
+  try {
+    text = await request.text();
+  } catch (error) {
+    return failure('bad-request', `the body could not be read: ${String((error && error.message) || error)}`, 400);
+  }
+  let body = null;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    body = null;
+  }
+  const replay = () => handler(new Request(request.url, { method: request.method, headers: request.headers, body: text }), ctx);
+  // Nothing addressable is named, so there is no slug to lock and nothing this wrapper can add: the
+  // handler refuses on its own terms, without writing anything.
+  const slug = body === null || typeof body !== 'object' ? '' : String(slugOf(body) || '');
+  if (!market.SLUG_PATTERN.test(slug)) return replay();
+  const op = kind === 'uninstall' ? 'uninstall' : market.manifestFor(slug) === null ? 'install' : 'update';
+  const held = market.acquireOperationLock({ slug, op });
+  if (held.ok !== true) return json({ ok: false, error: lockRefusal(held) }, 409);
+  try {
+    return await replay();
+  } finally {
+    market.releaseOperationLock(held);
+  }
+}
+
 /** The identity block both the preview and the install answer with. */
 function identityValue(identity) {
   return {
@@ -1031,6 +1088,28 @@ async function marketInstallResponse(request, ctx) {
   const identity = identityFor(ctx, name);
   if (identity.conflict !== '') return failure('identity-conflict', identity.conflict, 409);
 
+  // This bundle directory is shared by every profile under this HOME, so an in-place update is only
+  // this request's to make when no other profile loads the same content. A single reference is this
+  // profile's own — it has the row — while anything more, or a reference set that cannot be read,
+  // is refused rather than guessed at. The check runs inside the slug lock and before any write.
+  const links = market.bundleReferences(identity.slug);
+  if (links.ok !== true) {
+    return json({ ok: false, error: { code: links.code, message: links.reason, path: market.bundleDir(identity.slug) } }, 409);
+  }
+  const ours = identity.mode === 'update' ? 1 : 0;
+  if (links.references.length > ours) {
+    const profiles = links.references.map((link) => link.profile).join(', ');
+    return json({
+      ok: false,
+      error: {
+        code: 'shared-bundle',
+        message: `${market.bundleDir(identity.slug)} is linked by ${links.references.length} profiles (${profiles}), and updating it in place would change the content another profile loads`,
+        path: market.bundleDir(identity.slug),
+        sharedWith: links.references,
+      },
+    }, 409);
+  }
+
   // A reinstall keeps whatever the row already carries: the user's secrets are in the
   // profile, not in this request, and regenerating the patch from scratch would drop them.
   const slug = identity.slug;
@@ -1127,6 +1206,11 @@ async function marketInstallResponse(request, ctx) {
   try {
     written = market.writeBundle({ slug, rowId: identity.rowId, server, serverName, plan, args: installArgs, config, argumentValues, mcpbInfo });
   } catch (error) {
+    // A bundle path that is a link is not a failed write but a refused one: nothing may be written
+    // through it, and nothing was.
+    if (error !== null && error !== undefined && error.code === 'invalid-bundle-path') {
+      return failure('invalid-bundle-path', String(error.message), 409);
+    }
     return failure('write-failed', String((error && error.message) || error), 500);
   }
   // The installer answers with a ChangeResult, and it RESOLVES even when the install failed —
@@ -1234,7 +1318,16 @@ function marketInstalledResponse(ctx) {
   // Opening the market is also the moment residue heals: a link left behind by any past
   // uninstall is removed here, where nothing is mid-flight.
   const pruned = market.pruneAllBundleLinks();
-  return json({ ok: true, value: { items, count: items.length, toolListing: toolNames !== null, prunedLinks: pruned } });
+  // A release that failed leaves a lock behind; this is the one place a person can see that without
+  // going to the filesystem. Nothing is cleaned up from a read path.
+  const lockProblems = market.lockDiagnostics();
+  return json({
+    ok: true,
+    value: {
+      items, count: items.length, toolListing: toolNames !== null, prunedLinks: pruned,
+      ...(lockProblems.length === 0 ? {} : { lockDiagnostics: lockProblems }),
+    },
+  });
 }
 
 /**
@@ -1270,6 +1363,10 @@ export function apply(ctx) {
   register(MARKET_DETAIL_PATH, ['GET', 'HEAD'], async (request, context) => marketDetailResponse(request, context));
   register(MARKET_INSTALLED_PATH, ['GET', 'HEAD'], async (_request, context) => marketInstalledResponse(context));
   register(MARKET_REFRESH_PATH, ['POST'], (request) => marketRefreshResponse(request));
-  register(MARKET_INSTALL_PATH, ['POST'], async (request, context) => marketInstallResponse(request, context));
-  register(MARKET_UNINSTALL_PATH, ['POST'], async (request, context) => marketUninstallResponse(request, context));
+  // The two routes that change something take the slug lock the same way, so an install and an
+  // uninstall of one entry can never be in flight together.
+  register(MARKET_INSTALL_PATH, ['POST'], (request, context) =>
+    lockedMarketRoute(request, context, 'install', (body) => (typeof body.name === 'string' ? market.slugFor(body.name) : ''), marketInstallResponse));
+  register(MARKET_UNINSTALL_PATH, ['POST'], (request, context) =>
+    lockedMarketRoute(request, context, 'uninstall', (body) => (typeof body.slug === 'string' ? body.slug : ''), marketUninstallResponse));
 }

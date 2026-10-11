@@ -17,13 +17,16 @@
  * Nothing here imports `@deepseek-ai/*`: a third-party bundle resolves those from its own
  * real path and fails with ERR_MODULE_NOT_FOUND. Node builtins only.
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
+  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmdirSync,
   rmSync,
@@ -965,6 +968,308 @@ export function resolveArgv(plan, values = {}) {
   return { args, missing };
 }
 
+/**
+ * The one slug lock every market mutation takes.
+ *
+ * Two facts make this necessary, and neither is covered by DSH's own `withFileLock`:
+ *
+ * 1. `MARKET_ROOT` is keyed by HOME, not by profile, so every profile under this HOME links to the
+ *    SAME physical bundle directory. A second profile's content is decided by this directory.
+ * 2. DSH locks `<profile>/package.json` around its own profile change. Everything this plugin
+ *    writes — the bundle files, the mcpb payload — is outside that lock, and so is a second request
+ *    arriving in the same process.
+ *
+ * So the lock is taken here for install, update, uninstall and repair alike. It is deliberately
+ * timid about other people's files: a lock it cannot read is refused rather than removed, a holder
+ * it cannot identify is never taken over, and only a lock whose `txid` matches this transaction's
+ * is ever unlinked.
+ */
+
+/** The shape `slugFor` produces, and the only shape a bundle or lock path may be built from. */
+export const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+/** Bumped when the lock record's shape changes. */
+const LOCK_SCHEMA = 1;
+/** Slugs this process is operating on right now, so two requests cannot race before either locks. */
+const inFlightSlugs = new Map();
+/** The last few lock problems, so a release that failed cannot pass unnoticed. */
+const lockProblems = [];
+const LOCK_PROBLEM_LIMIT = 20;
+
+/** The lock file one slug uses, for readers that want to report its path. */
+export function lockPathFor(slug) {
+  return join(MARKET_ROOT, '.locks', `${slug}.lock`);
+}
+
+/** What went wrong releasing locks, newest last. Read-only; nothing here is a transaction log. */
+export function lockDiagnostics() {
+  return lockProblems.slice();
+}
+
+function noteLockProblem(entry) {
+  lockProblems.push(entry);
+  if (lockProblems.length > LOCK_PROBLEM_LIMIT) lockProblems.splice(0, lockProblems.length - LOCK_PROBLEM_LIMIT);
+}
+
+/** Whether a pid is still running. Only ever used to describe a holder, never to decide a lock's fate. */
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the process exists and is not ours to signal, which is still alive.
+    return error.code === 'EPERM';
+  }
+}
+
+function messageOf(error) {
+  return String((error && error.message) || error);
+}
+
+/**
+ * Read one lock file, and say whether it is a lock at all.
+ *
+ * An unreadable or incomplete lock answers `ok: false`: its holder cannot be identified, and a file
+ * whose owner is unknown is never removed and never written over.
+ */
+function describeLock(path) {
+  try {
+    if (lstatSync(path).isSymbolicLink()) {
+      return { ok: false, reason: `${path} is a link, so whatever it points at is not trusted as a lock` };
+    }
+  } catch (error) {
+    if (error.code === 'ENOENT') return { ok: false, reason: `${path} disappeared while it was being read` };
+    return { ok: false, reason: `${path} could not be inspected (${error.code})` };
+  }
+  let text;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (error) {
+    return { ok: false, reason: `${path} could not be read (${error.code}), so its holder is unknown` };
+  }
+  let record;
+  try {
+    record = JSON.parse(text);
+  } catch {
+    return { ok: false, reason: `${path} does not hold readable JSON, so its holder is unknown` };
+  }
+  if (record === null || typeof record !== 'object' || Array.isArray(record)
+    || typeof record.pid !== 'number' || typeof record.txid !== 'string' || record.txid === '') {
+    return { ok: false, reason: `${path} is not a complete lock record, so its holder is unknown` };
+  }
+  return { ok: true, record, alive: pidAlive(record.pid) };
+}
+
+/**
+ * Take the slug's file lock, exclusively.
+ *
+ * @param options - `{slug, op, profile, txid}`.
+ * @returns `{ok: true, path, txid, record}`, or `{ok: false, code, reason, path, holder?, holderAlive?}`.
+ */
+export function acquireSlugLock({ slug, op, profile = '', txid = '' }) {
+  const name = String(slug === undefined || slug === null ? '' : slug);
+  if (!SLUG_PATTERN.test(name)) {
+    return { ok: false, code: 'install-locked', path: '', reason: `"${name.slice(0, 40)}" is not a slug, so no lock path may be built from it` };
+  }
+  const dir = join(MARKET_ROOT, '.locks');
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch (error) {
+    return { ok: false, code: 'install-locked', path: dir, reason: `the lock directory could not be created: ${messageOf(error)}` };
+  }
+  // A junction or symlink where the lock directory belongs would send every lock file somewhere
+  // else, so the directory has to be a plain directory before anything is created inside it.
+  try {
+    const info = lstatSync(dir);
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      return { ok: false, code: 'install-locked', path: dir, reason: `${dir} is not a plain directory, so locks would not land inside the market root` };
+    }
+  } catch (error) {
+    return { ok: false, code: 'install-locked', path: dir, reason: `${dir} could not be inspected: ${messageOf(error)}` };
+  }
+  const path = join(dir, `${name}.lock`);
+  const record = {
+    schema: LOCK_SCHEMA, slug: name, op,
+    txid: txid === '' ? randomUUID() : txid,
+    pid: process.pid, profile, at: new Date().toISOString(),
+  };
+  let handle;
+  try {
+    handle = openSync(path, 'wx', 0o600);
+  } catch (error) {
+    if (error.code !== 'EEXIST') {
+      return { ok: false, code: 'install-locked', path, reason: `the lock could not be created: ${messageOf(error)}` };
+    }
+    const existing = describeLock(path);
+    if (existing.ok !== true) return { ok: false, code: 'install-locked', path, reason: existing.reason };
+    return {
+      ok: false, code: 'install-in-progress', path,
+      holder: existing.record, holderAlive: existing.alive,
+      reason: `"${existing.record.op}" is already running on ${name} (pid ${existing.record.pid}, since ${existing.record.at})`,
+    };
+  }
+  try {
+    writeFileSync(handle, JSON.stringify(record, null, 2), 'utf8');
+  } catch (error) {
+    try { closeSync(handle); } catch { /* the descriptor goes away with the file */ }
+    // This descriptor was created here with `wx`, so this file is unambiguously ours to remove.
+    try { unlinkSync(path); } catch { /* leaving a file we own beats deleting one we are unsure of */ }
+    return { ok: false, code: 'install-locked', path, reason: `the lock could not be written: ${messageOf(error)}` };
+  }
+  try { closeSync(handle); } catch { /* the record is on disk; the descriptor is not part of the contract */ }
+  return { ok: true, path, txid: record.txid, record };
+}
+
+/**
+ * Remove one lock, but only when it still belongs to this transaction.
+ *
+ * @param options - `{path, txid}`.
+ * @returns `{ok: true, path}` or `{ok: false, path, reason, holder?}`.
+ */
+export function releaseSlugLock({ path, txid }) {
+  if (typeof path !== 'string' || path === '' || typeof txid !== 'string' || txid === '') {
+    return { ok: false, path: typeof path === 'string' ? path : '', reason: 'no lock was identified, so none may be removed' };
+  }
+  const existing = describeLock(path);
+  if (existing.ok !== true) return { ok: false, path, reason: existing.reason };
+  if (existing.record.txid !== txid) {
+    return { ok: false, path, holder: existing.record, reason: `the lock belongs to ${existing.record.txid}, not ${txid}` };
+  }
+  try {
+    unlinkSync(path);
+  } catch (error) {
+    return { ok: false, path, reason: `the lock could not be removed: ${messageOf(error)}` };
+  }
+  return { ok: true, path };
+}
+
+/**
+ * Take the slug for one operation: in this process first, then in the filesystem.
+ *
+ * The in-process check is not redundant. Two requests in one process reach for the same slug before
+ * either has created a lock file, and the second must be refused rather than spend the first one's
+ * lock as a collision.
+ *
+ * @param options - `{slug, op, profile}`.
+ * @returns the same shape as {@link acquireSlugLock}, with `ok: false` when the slug is busy.
+ */
+export function acquireOperationLock({ slug, op, profile = '' }) {
+  const name = String(slug === undefined || slug === null ? '' : slug);
+  if (!SLUG_PATTERN.test(name)) {
+    return { ok: false, code: 'install-locked', path: '', reason: `"${name.slice(0, 40)}" is not a slug, so no lock path may be built from it` };
+  }
+  const running = inFlightSlugs.get(name);
+  if (running !== undefined) {
+    return {
+      ok: false, code: 'install-in-progress', path: lockPathFor(name),
+      holder: { ...running }, holderAlive: true,
+      reason: `this process is already running "${running.op}" on ${name}`,
+    };
+  }
+  const held = acquireSlugLock({ slug: name, op, profile });
+  if (held.ok !== true) return held;
+  inFlightSlugs.set(name, { op, txid: held.txid, pid: process.pid, at: held.record.at, profile });
+  return held;
+}
+
+/**
+ * Give the slug back.
+ *
+ * The in-process entry is always cleared, even when the file cannot be removed: leaving it set would
+ * wedge the slug for the rest of the process's life. A file that could not be removed is recorded
+ * instead of swallowed, and never removed on a guess.
+ *
+ * @param lock - what {@link acquireOperationLock} returned.
+ * @returns `{ok, path?, reason?}`.
+ */
+export function releaseOperationLock(lock) {
+  if (lock === null || typeof lock !== 'object' || typeof lock.path !== 'string' || typeof lock.txid !== 'string') {
+    return { ok: false, reason: 'no lock was held' };
+  }
+  const slug = lock.record !== undefined && typeof lock.record.slug === 'string' ? lock.record.slug : '';
+  const running = inFlightSlugs.get(slug);
+  if (running !== undefined && running.txid === lock.txid) inFlightSlugs.delete(slug);
+  const released = releaseSlugLock({ path: lock.path, txid: lock.txid });
+  if (released.ok !== true) {
+    noteLockProblem({ at: new Date().toISOString(), slug, op: lock.record === undefined ? '' : lock.record.op, txid: lock.txid, path: lock.path, reason: released.reason });
+  }
+  return released;
+}
+
+/**
+ * Every profile that loads this slug's bundle, resolved through the links rather than guessed.
+ *
+ * Targets are compared as real paths, because two different strings can name one directory and one
+ * string can name two. A link that resolves to nothing is residue, not a live reference; a link that
+ * cannot be resolved at all, or a profile directory that cannot be listed, answers `ok: false` so
+ * the caller fails closed instead of assuming there is nobody else.
+ *
+ * @param slug - the bundle slug.
+ * @returns `{ok: true, references: [{profile, link, target}]}` or `{ok: false, code, reason}`.
+ */
+export function bundleReferences(slug) {
+  const name = String(slug === undefined || slug === null ? '' : slug);
+  if (!SLUG_PATTERN.test(name)) {
+    return { ok: false, code: 'shared-bundle-unknown', reason: `"${name.slice(0, 40)}" is not a slug, so its references cannot be resolved` };
+  }
+  let target;
+  try {
+    target = realpathSync(bundleDir(name));
+  } catch (error) {
+    if (error.code === 'ENOENT') return { ok: true, references: [] };
+    return { ok: false, code: 'shared-bundle-unknown', reason: `${bundleDir(name)} could not be resolved (${error.code}), so what other profiles link to is unknown` };
+  }
+  const profiles = join(homedir(), '.dsh', 'profiles');
+  let names;
+  try {
+    names = readdirSync(profiles);
+  } catch (error) {
+    if (error.code === 'ENOENT') return { ok: true, references: [] };
+    return { ok: false, code: 'shared-bundle-unknown', reason: `the profile directory ${profiles} could not be listed (${error.code}), so other references cannot be ruled out` };
+  }
+  const references = [];
+  for (const profile of names) {
+    const link = join(profiles, profile, 'node_modules', BUNDLE_SCOPE, name);
+    let info;
+    try {
+      info = lstatSync(link);
+    } catch (error) {
+      if (error.code === 'ENOENT') continue;
+      return { ok: false, code: 'shared-bundle-unknown', reason: `${link} could not be inspected (${error.code})` };
+    }
+    if (!info.isSymbolicLink()) continue;
+    let resolved;
+    try {
+      resolved = realpathSync(link);
+    } catch (error) {
+      // A link whose target is gone resolves to nothing, so it is residue rather than a reference.
+      if (error.code === 'ENOENT') continue;
+      return { ok: false, code: 'shared-bundle-unknown', reason: `the link ${link} could not be resolved (${error.code})` };
+    }
+    if (resolved === target) references.push({ profile, link, target: resolved });
+  }
+  return { ok: true, references };
+}
+
+/**
+ * Why a bundle directory must not be written to, or `''` when it may.
+ *
+ * `<MARKET_ROOT>/<slug>` is about to receive this plugin's files. A link placed there would send
+ * every one of them outside the market root, so the path is inspected before it is written through.
+ */
+export function bundlePathProblem(slug) {
+  const dir = bundleDir(slug);
+  try {
+    const info = lstatSync(dir);
+    if (info.isSymbolicLink()) return `the bundle path ${dir} is a link, so writing through it would leave the market root`;
+    if (!info.isDirectory()) return `the bundle path ${dir} is not a directory`;
+  } catch (error) {
+    if (error.code === 'ENOENT') return '';
+    return `the bundle path ${dir} could not be inspected (${error.code})`;
+  }
+  return '';
+}
+
 /** A filesystem- and package-name-safe slug that stays unique per registry name. */
 export function slugFor(name) {
   const cleaned = String(name)
@@ -1536,6 +1841,14 @@ export function manifestFor(slug) {
  * @returns `{slug, dir, pkg, rowId}`.
  */
 export function writeBundle({ slug, rowId = '', server, serverName, plan, args, config, argumentValues, mcpbInfo }) {
+  // Checked before anything is created: a link placed at <MARKET_ROOT>/<slug> would take every file
+  // written below it out of the market root.
+  const unsafe = bundlePathProblem(slug);
+  if (unsafe !== '') {
+    const error = new Error(`invalid-bundle-path: ${unsafe}`);
+    error.code = 'invalid-bundle-path';
+    throw error;
+  }
   const dir = bundleDir(slug);
   ensureRoot();
   mkdirSync(dir, { recursive: true });
