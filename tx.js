@@ -405,6 +405,83 @@ export function configDigestOf(values) {
   return hash.digest('hex');
 }
 
+/** The version of the summary below. Bumped whenever its inputs or their encoding change. */
+export const CONFIG_DIGEST_VERSION = 2;
+
+/**
+ * One field of the summary, framed so that no arrangement of values can be read two ways.
+ *
+ * \`length:bytes\` rather than concatenation: a value containing a separator, a NUL or the text used
+ * for absence cannot move a boundary, so two different configurations cannot produce one encoding.
+ * Each type carries its own tag, which is why a missing value, an explicit null, an empty string,
+ * the text "undefined" and the number 1 are five different things rather than one.
+ */
+function frameValue(value) {
+  if (value === undefined) return '0:';
+  if (value === null) return '2:';
+  const type = typeof value;
+  const text = type === 'string' ? value : String(value);
+  return (type === 'string' ? '1:' : '3:' + type + ':') + text.length + ':' + text;
+}
+
+/**
+ * A versioned digest of everything that decides how a server is started.
+ *
+ * Version 2 exists because version 1 hashed only the configured values, and that is not enough to
+ * tell two configurations apart: the same values under a different transport, with a different
+ * command, with the arguments in a different order, or belonging to a different namespace all
+ * produced one digest. The inputs of version 2 are stated, and their order is fixed:
+ *
+ *     version | transport | command | namespace | argv (ordered) | configured pairs (sorted)
+ *
+ * - **namespace** is \`env\` or \`headers\`, chosen by the transport; it is part of the digest, so the
+ *   same pair of values in the two namespaces is two configurations;
+ * - **header names are folded** to lower case, because HTTP field names are case-insensitive, while
+ *   **environment names keep their case**, because they are case-sensitive;
+ * - **arguments keep their order**, and each contributes its value;
+ * - **absence, null, the empty string and other types are distinct**;
+ * - **no path is an input**: this is computed from what the server is configured to do, never from
+ *   where the bundle happens to be stored, so moving a bundle aside does not change its meaning.
+ *
+ * It is a comparison, not a protection: the rendered patch beside the manifest holds the plaintext.
+ * That is exactly why a digest like this must not be handed out by an API — a digest of a
+ * low-entropy value is an offline guessing oracle.
+ */
+export function configSummaryOf(input) {
+  const source = input === null || input === undefined || typeof input !== 'object' ? {} : input;
+  const headers = source.headers === undefined ? null : source.headers;
+  const env = source.env === undefined ? null : source.env;
+  const namespace = headers !== null && headers !== undefined ? 'headers' : 'env';
+  const chosen = namespace === 'headers' ? headers : env;
+  const map = chosen === null || chosen === undefined || typeof chosen !== 'object' ? {} : chosen;
+  const names = Object.keys(map).sort();
+  const normalized = [];
+  const pairs = [];
+  for (const key of names) {
+    // What is digested and what is reported are the same names, folded or not, so a reader of the
+    // summary sees exactly the keys the digest was taken over.
+    const name = namespace === 'headers' ? String(key).toLowerCase() : String(key);
+    normalized.push(name);
+    pairs.push(frameValue(name));
+    pairs.push(frameValue(map[key]));
+  }
+  const list = Array.isArray(source.args) ? source.args : [];
+  const argv = list.map((entry) => (entry !== null && typeof entry === 'object' ? entry.value : entry));
+  const parts = [
+    'v' + CONFIG_DIGEST_VERSION,
+    frameValue(source.transport),
+    frameValue(source.command),
+    frameValue(namespace),
+    frameValue(argv.length),
+    ...argv.map((entry) => frameValue(entry)),
+    frameValue(names.length),
+    ...pairs,
+  ];
+  const hash = createHash('sha256');
+  for (const part of parts) hash.update(part + '\u0000');
+  return { version: CONFIG_DIGEST_VERSION, namespace, argv, configuredKeys: normalized, digest: hash.digest('hex') };
+}
+
 /** How much of a bundle this reader is willing to look at before calling it too big to verify. */
 const BUNDLE_FILE_LIMIT = 4096;
 const BUNDLE_BYTES_LIMIT = 64 * 1024 * 1024;
