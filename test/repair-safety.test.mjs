@@ -376,13 +376,15 @@ test('[contract] accept treats a persisted bundle with a missing running row as 
   seedPublishedUpdate();
   const { routes } = makeCtx({ installed: true, rowContent: false });
 
+  // This used to expect a pending restart here. That was inferred from the running row being
+  // absent while the profile listed the bundle, with nothing recording that a restart was needed.
+  // An absence is not evidence of a restart: the honest answer is that the effect is unverified.
   const done = await repair(routes, { slug, action: 'accept', txid: 'tx-mine' });
 
-  assert.equal(done.status, 200, JSON.stringify(done.body));
-  assert.equal(done.body.value.pendingRestart, true);
-  assert.equal(done.body.value.live, false, 'persisted and running are not the same claim');
-  assert.equal(done.body.value.verified, true);
-  assert.equal(done.body.value.restartEvidence.some((item) => /installed/i.test(item)), true, JSON.stringify(done.body.value.restartEvidence));
+  assert.equal(done.status, 409, JSON.stringify(done.body));
+  assert.equal(done.body.error.code, 'verification-incomplete');
+  assert.equal(done.body.value.verified, false);
+  assert.equal(done.body.value.pendingRestart, false);
 });
 
 // --- [contract] rollback has to look at the configuration, not only at "installed" --------------

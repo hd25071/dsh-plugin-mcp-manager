@@ -53,7 +53,7 @@ function artifact(dir) {
   if (content.coverage !== 'whole-bundle' && extra.length > 0) {
     return { present: true, usable: false, reason: 'the bundle holds files this manifest does not cover (' + extra.join(', ') + ')' };
   }
-  return { present: true, usable: true, txid: content.txid, digest: content.recorded, configDigest: content.configDigest, coverage: content.coverage };
+  return { present: true, usable: true, txid: content.txid, digest: content.recorded, configDigest: content.configDigest, configDigestV2: content.configDigestV2, configEvidence: content.configEvidence, coverage: content.coverage };
 }
 
 function sorted(values) {
@@ -87,16 +87,29 @@ function compareRow(row, live) {
     checked.push('configured keys');
     if (!sameSet(row.envKeys, live.configKeys)) mismatched.push('the configured keys are ' + JSON.stringify(sorted(row.envKeys)) + ' and the manifest records ' + JSON.stringify(sorted(live.configKeys)));
   }
-  // The values themselves, compared without being written down anywhere: the manifest records a
-  // digest of what it rendered, and the running row is digested here, in memory.
-  if (typeof live.configDigest === 'string' && live.configDigest !== '') {
-    if (row.values === null || typeof row.values !== 'object') {
-      return { verdict: 'incomplete', detail: 'the running row carries no configured values to compare with' };
-    }
-    checked.push('configured values');
-    if (tx.configDigestOf(row.values) !== live.configDigest) mismatched.push('the configured values are not the ones this version was installed with');
-  } else {
-    return { verdict: 'incomplete', detail: 'the manifest records no digest of its configured values, so they cannot be compared' };
+  // The configuration itself, compared without any of it being written down. Only version 2
+  // evidence is used: version 1 could not see the transport, the command, the order of the
+  // arguments or which namespace the values belonged to, so agreeing with it does not show that the
+  // running configuration is this version's. There is no fallback to it — a fallback would authorise
+  // exactly the operations the weaker evidence could not distinguish.
+  const evidence = typeof live.configEvidence === 'string' ? live.configEvidence : 'absent';
+  if (evidence !== 'v2') {
+    return { verdict: 'incomplete', detail: 'the manifest records no usable version 2 configuration evidence (' + evidence + ')' };
+  }
+  if (row === null || row === undefined || row.present !== true) {
+    return { verdict: 'incomplete', detail: 'the running configuration has no row for this bundle' };
+  }
+  // A row that does not say how the server starts is not filled in from the manifest: a default
+  // would be a claim about the running configuration that nothing observed.
+  if (typeof row.transport !== 'string' || row.transport === '' || typeof row.command !== 'string' || row.command === '') {
+    return { verdict: 'incomplete', detail: 'the running row does not record the transport and the command that the summary covers' };
+  }
+  checked.push('the launch fields: transport, command, arguments and the configured ' + evidence + ' values');
+  const summary = tx.configSummaryOf({ transport: row.transport, command: row.command, args: row.args, env: row.env, headers: row.headers });
+  if (live.configNamespace !== '' && summary.namespace !== live.configNamespace) {
+    mismatched.push('the running row configures ' + summary.namespace + ' and the manifest summarised ' + live.configNamespace);
+  } else if (summary.digest !== live.configDigestV2) {
+    mismatched.push('the running configuration is not the one this version was installed with');
   }
   if (checked.length === 0) return { verdict: 'inconclusive', detail: 'nothing about the running row can be compared with the manifest' };
   if (mismatched.length > 0) return { verdict: 'mismatched', detail: mismatched.join('; '), checked };
@@ -201,21 +214,35 @@ export function planRepair({ action, slug, txid, diagnosis, live, row, root, bun
     // Whoever is running now has to be one of the two versions this transaction knows about: the
     // one it published, or the one it backed up. A third configuration means something changed
     // outside this transaction, and a rollback would overwrite it.
-    const known = [live && live.configDigest, backup.configDigest].filter((value) => typeof value === 'string' && value !== '');
-    if (known.length === 0) {
-      reasons.push('neither version records a digest of its configured values, so the running configuration cannot be shown to be one of them');
-      return null;
-    }
-    if (row === null || row === undefined || row.present !== true) {
-      if (backup.present) { reasons.push('the running configuration has no row for this bundle, so the effect of a rollback cannot be predicted'); return null; }
-    } else if (row.values === null || typeof row.values !== 'object') {
-      reasons.push('the running configuration\'s values cannot be read, so a rollback cannot be shown to preserve them');
-      return null;
-    } else if (!known.includes(tx.configDigestOf(row.values))) {
-      reasons.push('the running configuration matches neither the published version nor the backup, so it changed outside this transaction');
-      return null;
-    } else {
-      evidence.push('the running configuration is one of the two versions this transaction knows');
+    // An update replaces a configuration that is running, so the running one has to be shown to be
+    // one of the two versions this transaction knows — and only version 2 evidence can show it.
+    // A first install has no running configuration to preserve: it never became one, so it is judged
+    // on ownership and on the official install state instead, and none of this applies to it.
+    if (backup.present) {
+      const known = [
+        live && live.configEvidence === 'v2' ? live.configDigestV2 : '',
+        backup.configEvidence === 'v2' ? backup.configDigestV2 : '',
+      ].filter((value) => typeof value === 'string' && value !== '');
+      if (known.length === 0) {
+        reasons.push('neither the published version nor the backup records usable version 2 configuration evidence (published: '
+          + String((live && live.configEvidence) || 'absent') + ', backup: ' + String(backup.configEvidence || 'absent')
+          + '), so the running configuration cannot be shown to be one of them');
+        return null;
+      }
+      if (row === null || row === undefined || row.present !== true) {
+        reasons.push('the running configuration has no row for this bundle, so the effect of a rollback cannot be predicted');
+        return null;
+      }
+      if (typeof row.transport !== 'string' || row.transport === '' || typeof row.command !== 'string' || row.command === '') {
+        reasons.push('the running row does not record the transport and the command, so a rollback cannot be shown to preserve it');
+        return null;
+      }
+      const running = tx.configSummaryOf({ transport: row.transport, command: row.command, args: row.args, env: row.env, headers: row.headers });
+      if (!known.includes(running.digest)) {
+        reasons.push('the running configuration matches neither the published version nor the backup, so it changed outside this transaction');
+        return null;
+      }
+      evidence.push('the running configuration is one of the two versions this transaction knows, on version 2 evidence');
     }
     if (backup.present) {
       if (backup.usable !== true) { reasons.push('the backup cannot be verified: ' + backup.reason); return null; }
@@ -265,8 +292,13 @@ export function planRepair({ action, slug, txid, diagnosis, live, row, root, bun
     if (comparison.verdict === 'mismatched') { reasons.push('the running configuration is not this version: ' + comparison.detail); return null; }
     if (comparison.verdict === 'inconclusive') { reasons.push('the running configuration cannot be compared with the manifest: ' + comparison.detail); return null; }
     if (comparison.verdict === 'absent') {
-      // Nothing running is only a pending restart when the profile itself says the bundle is there.
-      // Otherwise it is a persisted state that never happened, which is not a success at all.
+      // A restart is not inferred from an absence. Until an operation records the installer's own
+      // restart requirement, a missing row means the running configuration cannot be verified at
+      // all — an incomplete verification, never a success and never a live configuration.
+      reasons.push('the running configuration does not carry this bundle, and this transaction records no restart requirement from the installer, so the effect of the publish cannot be verified');
+      return { incomplete: true };
+    }
+    if (comparison.verdict === 'never') {
       if (official.rowPersisted !== true) {
         reasons.push('the running configuration has no row for this bundle, and the profile does not list that row as persisted either, so the install never took effect');
         return null;

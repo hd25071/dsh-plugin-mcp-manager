@@ -550,11 +550,15 @@ test('[contract] accept keeps the pending-restart meaning instead of calling it 
 
   const done = await repair(routes, { slug, action: 'accept', txid: 'tx-ours' });
 
-  assert.equal(done.status, 200, JSON.stringify(done.body));
-  assert.equal(done.body.value.outcome, 'accepted');
-  assert.equal(done.body.value.pendingRestart, true, 'persisted, not running: the answer has to say which');
-  assert.equal(done.body.value.verified, true, 'the persisted state was verified');
+  // This used to expect `pendingRestart: true, verified: true` here. Both were inferred from the
+  // running row being absent, with nothing recording that a restart was needed — a success reported
+  // on an absence. Until the installer's own restart requirement is persisted, the answer has to be
+  // that the effect cannot be verified.
+  assert.equal(done.status, 409, JSON.stringify(done.body));
+  assert.equal(done.body.error.code, 'verification-incomplete');
+  assert.equal(done.body.value.verified, false);
   assert.equal(done.body.value.live, false);
+  assert.equal(done.body.value.pendingRestart, false);
 });
 
 test('[contract] accept refuses a state that cannot be verified at all', async () => {

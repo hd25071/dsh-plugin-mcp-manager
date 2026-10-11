@@ -1366,7 +1366,7 @@ async function marketInstallResponse(request, ctx) {
       serverName,
       txid,
       phase: 'DONE',
-      renderDigest: written.renderDigest,
+      // No digest: the client has no use for one, and a digest is not a thing to hand around.
       // "reinstalled" means the profile really has this row. It used to mean only that files for
       // this slug were on disk, which an install that never took effect also leaves behind.
       reinstalled: identity.mode === 'update',
@@ -1661,7 +1661,7 @@ function repairInputs(ctx, manager, slug, selfTxid = '') {
   return {
     live,
     diagnosis,
-    row: rowId === '' ? { present: false, serverName: '', command: '', envKeys: [], values: null } : effectiveRowFor(ctx, rowId),
+    row: rowId === '' ? { present: false, serverName: '', transport: '', command: '', args: [], env: null, headers: null, envKeys: [], values: null } : effectiveRowFor(ctx, rowId),
   };
 }
 
@@ -1680,7 +1680,7 @@ function repairInputs(ctx, manager, slug, selfTxid = '') {
 function effectiveRowFor(ctx, rowId) {
   const rows = profileMcpRows(ctx);
   if (!Array.isArray(rows) || rowId === '' || !rows.some((candidate) => candidate.id === rowId)) {
-    return { present: false, serverName: '', command: '', envKeys: [], values: null };
+    return { present: false, serverName: '', transport: '', command: '', args: [], env: null, headers: null, envKeys: [], values: null };
   }
   const editor = serviceOf(ctx, 'configEditor');
   try {
@@ -1689,21 +1689,30 @@ function effectiveRowFor(ctx, rowId) {
       if (moduleOfEntry(entry) !== MCP_MODULE) continue;
       if (idOfEntry(entry) !== rowId) continue;
       const effective = { ...((item && item.inherited) || {}), ...((item && item.override) || {}) };
-      const values = effective.transport === 'streamable-http' ? effective.headers : effective.env;
+      const isHttp = effective.transport === 'streamable-http';
+      const values = isHttp ? effective.headers : effective.env;
+      const map = values !== null && typeof values === 'object' && !Array.isArray(values) ? { ...values } : null;
       return {
         present: true,
         serverName: typeof effective.serverName === 'string' ? effective.serverName : '',
+        // The launch fields are normalised here, in one place, and never filled in from the manifest:
+        // an absent transport or command has to stay absent so the comparison reports that it cannot
+        // be made instead of inventing one.
+        transport: typeof effective.transport === 'string' ? effective.transport : '',
         command: typeof effective.command === 'string' ? effective.command : '',
-        envKeys: values !== null && typeof values === 'object' && !Array.isArray(values) ? Object.keys(values) : [],
+        args: Array.isArray(effective.args) ? effective.args.slice() : [],
+        env: isHttp ? null : map,
+        headers: isHttp ? map : null,
+        envKeys: map === null ? [] : Object.keys(map),
         // The values themselves stay inside this process: they are compared against a digest the
         // manifest recorded, never written into a journal or repeated in an answer.
-        values: values !== null && typeof values === 'object' && !Array.isArray(values) ? { ...values } : null,
+        values: map,
       };
     }
   } catch {
-    return { present: false, serverName: '', command: '', envKeys: [], values: null };
+    return { present: false, serverName: '', transport: '', command: '', args: [], env: null, headers: null, envKeys: [], values: null };
   }
-  return { present: false, serverName: '', command: '', envKeys: [], values: null };
+  return { present: false, serverName: '', transport: '', command: '', args: [], env: null, headers: null, envKeys: [], values: null };
 }
 
 /** The plan, the diagnosis behind it, and what the answer says was or would be changed. */
@@ -1806,7 +1815,10 @@ function marketInstalledResponse(ctx) {
     // is not the place for whatever a future one adds: a digest of a low-entropy value is a guessing
     // oracle, and configured values must never appear here at all. Only what a person is shown is
     // carried over; recovery reads the rest from disk.
-    const carried = ['registryName', 'registryVersion', 'registryTitle', 'installedAt', 'source', 'mcpb', 'slug', 'pkg', 'rowId', 'serverName', 'kind', 'registryType', 'transport', 'command', 'args', 'url', 'configKeys', 'txid'];
+    // `args` and `url` are deliberately absent. An argument may be a credential typed into a slot,
+    // and a url may carry one in its query — neither can be redacted by pattern, so neither is
+    // handed out. What a person needs is the command and the names of the configured keys.
+    const carried = ['registryName', 'registryVersion', 'registryTitle', 'installedAt', 'source', 'mcpb', 'slug', 'pkg', 'rowId', 'serverName', 'kind', 'registryType', 'transport', 'command', 'configKeys', 'txid'];
     const rest = {};
     for (const field of carried) if (manifest[field] !== undefined) rest[field] = manifest[field];
     return {
