@@ -747,6 +747,55 @@ function installRefused(code, message, status, { written, identity, result, veri
   }, status);
 }
 
+/** The current profile as the DSH host describes it, or `null` when the host did not say. */
+function currentProfileOf(ctx) {
+  const profile = serviceOf(ctx, 'profileContext');
+  if (profile === undefined || profile === null || typeof profile !== 'object') return null;
+  const dir = typeof profile.dir === 'string' ? profile.dir : '';
+  if (dir === '') return null;
+  return { name: typeof profile.name === 'string' ? profile.name : '', dir };
+}
+
+/**
+ * Whether this bundle may be changed in place, and who else would notice if it were.
+ *
+ * `MARKET_ROOT` is keyed by HOME, so a bundle written for one profile can be the bundle another
+ * profile loads. An update and an uninstall both have to know who else uses it — and which of those
+ * users is *this* profile, which only the host's `profileContext` can say. Without that identity a
+ * single reference is not evidence that the reference is ours, so nothing is changed.
+ *
+ * @param ctx - the plugin context.
+ * @param slug - the bundle slug.
+ * @returns `{ok: true, references}` or `{ok: false, code, message, path, sharedWith}`.
+ */
+function sharedBundleRefusal(ctx, slug) {
+  const dir = market.bundleDir(slug);
+  const links = market.bundleReferences(slug, currentProfileOf(ctx));
+  if (links.ok !== true) return { ok: false, code: links.code, message: links.reason, path: dir, sharedWith: [] };
+  if (links.references.length === 0) return { ok: true, references: [] };
+  const foreign = links.references.filter((reference) => reference.current !== true);
+  if (links.ownership !== 'known') {
+    const names = links.references.map((reference) => reference.profile).join(', ');
+    return {
+      ok: false,
+      code: 'shared-bundle-unknown',
+      message: `${dir} is referenced by ${links.references.length} profile(s) (${names}), and this process cannot tell which profile is asking, so nothing is changed`,
+      path: dir,
+      sharedWith: links.references,
+    };
+  }
+  if (foreign.length > 0) {
+    return {
+      ok: false,
+      code: 'shared-bundle',
+      message: `${dir} is also used by ${foreign.map((reference) => reference.profile).join(', ')}, so changing it would change what another profile loads`,
+      path: dir,
+      sharedWith: foreign,
+    };
+  }
+  return { ok: true, references: links.references };
+}
+
 /** The body of a refusal that names whoever is holding the slug. */
 function lockRefusal(held) {
   return {
@@ -1092,22 +1141,9 @@ async function marketInstallResponse(request, ctx) {
   // this request's to make when no other profile loads the same content. A single reference is this
   // profile's own — it has the row — while anything more, or a reference set that cannot be read,
   // is refused rather than guessed at. The check runs inside the slug lock and before any write.
-  const links = market.bundleReferences(identity.slug);
-  if (links.ok !== true) {
-    return json({ ok: false, error: { code: links.code, message: links.reason, path: market.bundleDir(identity.slug) } }, 409);
-  }
-  const ours = identity.mode === 'update' ? 1 : 0;
-  if (links.references.length > ours) {
-    const profiles = links.references.map((link) => link.profile).join(', ');
-    return json({
-      ok: false,
-      error: {
-        code: 'shared-bundle',
-        message: `${market.bundleDir(identity.slug)} is linked by ${links.references.length} profiles (${profiles}), and updating it in place would change the content another profile loads`,
-        path: market.bundleDir(identity.slug),
-        sharedWith: links.references,
-      },
-    }, 409);
+  const shared = sharedBundleRefusal(ctx, identity.slug);
+  if (shared.ok !== true) {
+    return json({ ok: false, error: { code: shared.code, message: shared.message, path: shared.path, sharedWith: shared.sharedWith } }, 409);
   }
 
   // A reinstall keeps whatever the row already carries: the user's secrets are in the
@@ -1276,6 +1312,14 @@ async function marketUninstallResponse(request, ctx) {
   if (manager === undefined || typeof manager.removeBundle !== 'function') {
     return failure('service-unavailable', 'the pluginManager service is not mounted in this profile', 503);
   }
+  // Whoever else loads this bundle is checked before anything is called: `removeBundle` rewrites
+  // this profile's configuration and `removeBundleDir` deletes the directory every other profile
+  // reading it points at. Once either has run the damage is done, so the refusal has to come first
+  // and without touching the profile at all.
+  const shared = sharedBundleRefusal(ctx, slug);
+  if (shared.ok !== true) {
+    return json({ ok: false, error: { code: shared.code, message: shared.message, path: shared.path, sharedWith: shared.sharedWith } }, 409);
+  }
   let removed;
   try {
     removed = await manager.removeBundle(manifest.pkg);
@@ -1287,7 +1331,13 @@ async function marketUninstallResponse(request, ctx) {
   // Pruning it here is the difference between "uninstalled" and "uninstalled with a dead link
   // still sitting in the profile's node_modules".
   const pruned = market.pruneBundleLinks(slug);
-  return json({ ok: true, value: { slug, pkg: manifest.pkg, removed: removed === undefined ? null : removed, deleted, pruned } });
+  return json({
+    ok: true,
+    value: {
+      slug, pkg: manifest.pkg, removed: removed === undefined ? null : removed, deleted, pruned,
+      sharedWith: shared.references,
+    },
+  });
 }
 
 /**

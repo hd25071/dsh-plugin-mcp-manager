@@ -1196,59 +1196,137 @@ export function releaseOperationLock(lock) {
   return released;
 }
 
+/** Whether one profile's manifest lists this package, the way DSH itself decides that it loads it. */
+function profileDeclares(dir, pkg) {
+  const file = join(dir, 'package.json');
+  let text;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch (error) {
+    // A directory with no manifest of its own declares nothing; anything else means the profile
+    // cannot be read, and an unreadable profile is not an empty one.
+    if (error.code === 'ENOENT') return { ok: true, value: false };
+    return { ok: false, reason: `${file} could not be read (${error.code}), so what it references is unknown` };
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(text);
+  } catch {
+    return { ok: false, reason: `${file} is not readable JSON, so what it references is unknown` };
+  }
+  if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    return { ok: false, reason: `${file} is not a profile manifest` };
+  }
+  const selected = manifest.dsh !== null && typeof manifest.dsh === 'object' && manifest.dsh.profile !== null
+    && typeof manifest.dsh.profile === 'object' && Array.isArray(manifest.dsh.profile.bundles)
+    ? manifest.dsh.profile.bundles
+    : [];
+  const dependencies = manifest.dependencies !== null && typeof manifest.dependencies === 'object'
+    ? Object.keys(manifest.dependencies)
+    : [];
+  return { ok: true, value: selected.includes(pkg) || dependencies.includes(pkg) };
+}
+
+/** Whether one profile's own node_modules has a link that lands on this bundle directory. */
+function profileLinksTo(dir, slug, target) {
+  const link = join(dir, 'node_modules', BUNDLE_SCOPE, slug);
+  let info;
+  try {
+    info = lstatSync(link);
+  } catch (error) {
+    if (error.code === 'ENOENT') return { ok: true, value: false };
+    return { ok: false, reason: `${link} could not be inspected (${error.code})` };
+  }
+  if (!info.isSymbolicLink()) return { ok: true, value: false };
+  let resolved;
+  try {
+    resolved = realpathSync(link);
+  } catch (error) {
+    // A link whose target is gone resolves to nothing, so it is residue rather than a reference.
+    if (error.code === 'ENOENT') return { ok: true, value: false };
+    return { ok: false, reason: `the link ${link} could not be resolved (${error.code})` };
+  }
+  return { ok: true, value: target !== '' && resolved === target };
+}
+
 /**
- * Every profile that loads this slug's bundle, resolved through the links rather than guessed.
+ * Every profile that uses this slug's bundle, and which of them is the one asking.
+ *
+ * Two kinds of evidence, because they answer slightly different questions:
+ *
+ * - **declared**: the profile's own manifest lists the package in \`dsh.profile.bundles\` or in its
+ *   dependencies — the same composition the official reader uses, which is what decides that DSH
+ *   loads the bundle at all;
+ * - **linked**: the profile's node_modules has a link that really lands on this directory, so that
+ *   profile is reading these bytes whatever its manifest says.
  *
  * Targets are compared as real paths, because two different strings can name one directory and one
- * string can name two. A link that resolves to nothing is residue, not a live reference; a link that
- * cannot be resolved at all, or a profile directory that cannot be listed, answers `ok: false` so
- * the caller fails closed instead of assuming there is nobody else.
+ * string can name two. A reference is attributed to the current profile only when \`ours\` says which
+ * profile this is: a reference count of one is not evidence that the reference is ours, so when the
+ * identity is missing the answer says \`ownership: 'unknown'\` and the caller refuses instead of
+ * subtracting one on faith.
  *
  * @param slug - the bundle slug.
- * @returns `{ok: true, references: [{profile, link, target}]}` or `{ok: false, code, reason}`.
+ * @param ours - the current profile \`{name, dir}\`, or null when the host did not say.
+ * @returns \`{ok: true, references, ownership}\` or \`{ok: false, code, reason}\`.
  */
-export function bundleReferences(slug) {
+export function bundleReferences(slug, ours = null) {
   const name = String(slug === undefined || slug === null ? '' : slug);
   if (!SLUG_PATTERN.test(name)) {
     return { ok: false, code: 'shared-bundle-unknown', reason: `"${name.slice(0, 40)}" is not a slug, so its references cannot be resolved` };
   }
-  let target;
+  let target = '';
   try {
     target = realpathSync(bundleDir(name));
   } catch (error) {
-    if (error.code === 'ENOENT') return { ok: true, references: [] };
-    return { ok: false, code: 'shared-bundle-unknown', reason: `${bundleDir(name)} could not be resolved (${error.code}), so what other profiles link to is unknown` };
+    if (error.code !== 'ENOENT') {
+      return { ok: false, code: 'shared-bundle-unknown', reason: `${bundleDir(name)} could not be resolved (${error.code}), so what other profiles point at is unknown` };
+    }
   }
+  let oursDir = '';
+  if (ours !== null && ours !== undefined && typeof ours.dir === 'string' && ours.dir !== '') {
+    try {
+      oursDir = realpathSync(ours.dir);
+    } catch (error) {
+      return { ok: false, code: 'shared-bundle-unknown', reason: `the current profile directory ${ours.dir} could not be resolved (${error.code}), so references cannot be attributed` };
+    }
+  }
+  const ownership = oursDir === '' ? 'unknown' : 'known';
   const profiles = join(homedir(), '.dsh', 'profiles');
   let names;
   try {
     names = readdirSync(profiles);
   } catch (error) {
-    if (error.code === 'ENOENT') return { ok: true, references: [] };
+    if (error.code === 'ENOENT') return { ok: true, references: [], ownership };
     return { ok: false, code: 'shared-bundle-unknown', reason: `the profile directory ${profiles} could not be listed (${error.code}), so other references cannot be ruled out` };
   }
   const references = [];
   for (const profile of names) {
-    const link = join(profiles, profile, 'node_modules', BUNDLE_SCOPE, name);
+    const dir = join(profiles, profile);
     let info;
     try {
-      info = lstatSync(link);
+      info = lstatSync(dir);
     } catch (error) {
       if (error.code === 'ENOENT') continue;
-      return { ok: false, code: 'shared-bundle-unknown', reason: `${link} could not be inspected (${error.code})` };
+      return { ok: false, code: 'shared-bundle-unknown', reason: `${dir} could not be inspected (${error.code})` };
     }
-    if (!info.isSymbolicLink()) continue;
-    let resolved;
-    try {
-      resolved = realpathSync(link);
-    } catch (error) {
-      // A link whose target is gone resolves to nothing, so it is residue rather than a reference.
-      if (error.code === 'ENOENT') continue;
-      return { ok: false, code: 'shared-bundle-unknown', reason: `the link ${link} could not be resolved (${error.code})` };
+    if (!info.isDirectory() || info.isSymbolicLink()) continue;
+    const declared = profileDeclares(dir, `${BUNDLE_PREFIX}${name}`);
+    if (declared.ok !== true) return { ok: false, code: 'shared-bundle-unknown', reason: declared.reason };
+    const linked = profileLinksTo(dir, name, target);
+    if (linked.ok !== true) return { ok: false, code: 'shared-bundle-unknown', reason: linked.reason };
+    if (declared.value !== true && linked.value !== true) continue;
+    let current = false;
+    if (oursDir !== '') {
+      try {
+        current = realpathSync(dir) === oursDir;
+      } catch (error) {
+        return { ok: false, code: 'shared-bundle-unknown', reason: `${dir} could not be resolved (${error.code}), so its ownership is unknown` };
+      }
     }
-    if (resolved === target) references.push({ profile, link, target: resolved });
+    references.push({ profile, dir, declared: declared.value, linked: linked.value, current });
   }
-  return { ok: true, references };
+  return { ok: true, references, ownership };
 }
 
 /**

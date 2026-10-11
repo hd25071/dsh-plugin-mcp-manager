@@ -96,13 +96,19 @@ function gate(limit = 1) {
  * is what the fake installer makes true, and what \`seedInstalled\` sets up for the update cases.
  * An always-empty listing would trip P2-3A's verification instead of testing the lock.
  */
-function makeCtx({ hold = null } = {}) {
+function makeCtx({ hold = null, profile = 'desktop', currentDir = null } = {}) {
   const routes = new Map();
   const calls = { install: [], remove: [] };
+  // The host tells the plugin which profile is asking. The directory has to exist for the identity
+  // to be usable, so cases that need a known owner get a real one here; cases that need to test an
+  // unreadable profile set pass a directory of their own.
+  const dir = currentDir === null ? join(PROFILES, profile) : currentDir;
+  if (currentDir === null) mkdirSync(dir, { recursive: true });
   const known = () => [slugOf(A), slugOf(B)].filter((slug) => existsSync(join(market.MARKET_ROOT, slug, 'market.meta.json')));
   const ctx = {
     get(key) {
       if (key === 'connection') return { fetch: { register(spec) { routes.set(spec.path, spec); } } };
+      if (key === 'profileContext') return { name: profile, dir, installAnchor: join(home, 'app', 'package.json') };
       if (key === 'pluginManager') return {
         async installBundle(dir, options) {
           calls.install.push({ dir, options });
@@ -288,6 +294,33 @@ test('releasing a lock that is no longer ours deletes nothing', async () => {
   assert.equal(existsSync(path), false);
 });
 
+test('the ownership check reads the lock at release time, not once at acquire time', async () => {
+  seedCache();
+  const { routes, calls } = makeCtx({});
+  const held = market.acquireOperationLock({ slug: slugOf(A), op: 'install' });
+  assert.equal(held.ok, true);
+  // Stand in for the whole window a release has to survive: our lock disappears and a different
+  // transaction's lock appears in its place before the release runs. Nothing between the release's
+  // read and its unlink can put a file back — creating one needs \`wx\`, which needs the path to be
+  // free — so a replaced lock is the only way a foreign file can be sitting there at all.
+  rmSync(held.path);
+  const foreign = { schema: 1, slug: slugOf(A), op: 'uninstall', txid: 'someone-else', pid: process.pid, profile: 'laptop', at: new Date().toISOString() };
+  writeFileSync(held.path, JSON.stringify(foreign), 'utf8');
+
+  const released = market.releaseOperationLock(held);
+  assert.equal(released.ok, false, 'a release may not remove a lock it cannot prove is its own');
+  assert.equal(readFileSync(held.path, 'utf8'), JSON.stringify(foreign), 'and leaves it byte-for-byte alone');
+
+  // The failed release still gives this process its slug back, so the next attempt reports the real
+  // holder instead of claiming this process is somehow still running the operation.
+  const next = await install(routes, A);
+  assert.equal(next.status, 409);
+  assert.equal(next.body.error.code, 'install-in-progress');
+  assert.equal(next.body.error.holder.txid, 'someone-else');
+  assert.equal(next.body.error.holder.profile, 'laptop');
+  assert.equal(calls.install.length, 0);
+});
+
 test('a lock path that is a name, not a slug, is refused before any path is built', () => {
   for (const slug of ['../../../etc/passwd', 'a/b', '', 'A', '.hidden', 'x\\y']) {
     const held = market.acquireOperationLock({ slug, op: 'install' });
@@ -315,7 +348,9 @@ test('an update is refused when another profile also uses this bundle', async ()
   const refused = await install(routes, A);
   assert.equal(refused.status, 409, 'rewriting the content another profile loads is not this request\'s to do');
   assert.equal(refused.body.error.code, 'shared-bundle');
-  assert.deepEqual(refused.body.error.sharedWith.map((item) => item.profile).sort(), ['desktop', 'laptop']);
+  // Only the profiles that are NOT this one are refused for: this profile's own reference is not
+  // something it needs permission from itself for.
+  assert.deepEqual(refused.body.error.sharedWith.map((item) => item.profile).sort(), ['laptop']);
   assert.equal(calls.install.length, 0, 'nothing may be installed while the bundle is shared');
   assert.equal(readFileSync(join(bundleOf(A), 'cordis.patch.yml'), 'utf8'), patch, 'the shared content is untouched');
 });
@@ -349,10 +384,13 @@ test('a link to some other directory is not a reference to this bundle', async (
 test('a profiles directory that cannot be read fails closed', async () => {
   seedCache();
   const patch = seedInstalled(A);
-  const { routes, calls } = makeCtx({});
-  // A file where the profile directory should be: the references cannot be enumerated at all.
+  // The current profile is put somewhere real and resolvable, so the only thing that can make this
+  // case fail is the profile set itself being unreadable — not a missing identity.
+  const ours = join(home, 'profile-desktop');
+  mkdirSync(ours, { recursive: true });
   mkdirSync(join(home, '.dsh'), { recursive: true });
   writeFileSync(PROFILES, 'not a directory', 'utf8');
+  const { routes, calls } = makeCtx({ currentDir: ours });
 
   const refused = await install(routes, A);
   assert.equal(refused.status, 409);

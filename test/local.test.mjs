@@ -282,6 +282,9 @@ test('uninstalling a local entry takes the same path as a registry one', async (
   const ctx = {
     get(key) {
       if (key === 'connection') return { fetch: { register(spec) { routes.set(spec.path, spec); } } };
+      // The junction below is in the asking profile's own node_modules, so the host has to say which
+      // profile is asking: a link this profile owns is its own residue to clean, not a shared bundle.
+      if (key === 'profileContext') return { name: 'desktop', dir: join(home, '.dsh', 'profiles', 'desktop') };
       if (key === 'pluginManager') return { async removeBundle(name) { calls.remove.push(name); return { exitCode: 0 }; } };
       return undefined;
     },
