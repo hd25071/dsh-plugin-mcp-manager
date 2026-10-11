@@ -1948,6 +1948,12 @@ export function writeBundle({ slug, rowId = '', server, serverName, plan, args, 
   writeFileSync(join(target, 'package.json'), manifestJson, 'utf8');
   writeFileSync(join(target, 'cordis.patch.yml'), patchYaml, 'utf8');
   const envKeys = Object.keys(config);
+  // The values are digested, never recorded: the digest is what lets a recovery prove the running
+  // configuration is the one this transaction rendered.
+  const envValues = {};
+  for (const key of envKeys) envValues[key] = config[key];
+  const scanned = tx.digestDirectory(target, { exclude: ['market.meta.json'] });
+  const wholeDigest = scanned.ok === true ? scanned.digest : '';
   writeFileSync(join(target, 'market.meta.json'), `${JSON.stringify({
     registryName: server.name,
     registryVersion: server.version,
@@ -1971,6 +1977,11 @@ export function writeBundle({ slug, rowId = '', server, serverName, plan, args, 
     // a manifest written before these fields existed simply has neither.
     txid: txid === '' ? null : txid,
     renderDigest,
+    // A digest of the whole directory, so a payload the renderer did not write down is still
+    // covered, and a digest of the configured values, so a recovery can check them without
+    // keeping a copy of them.
+    contentDigest: wholeDigest === '' ? null : wholeDigest,
+    configDigest: tx.configDigestOf(envValues),
   }, null, 2)}\n`, 'utf8');
   return { slug, dir: target, pkg, rowId: identity, txid, renderDigest };
 }

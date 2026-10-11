@@ -1605,7 +1605,11 @@ async function marketRepairResponse(request, ctx) {
     }
     const plan = planned(evidence);
     if (plan.allowed !== true) {
-      return json({ ok: false, error: { code: plan.code, message: plan.reasons.join('; '), reasons: plan.reasons, state: plan.state, phase: plan.phase } }, 409);
+      return json({
+        ok: false,
+        error: { code: plan.code, message: plan.reasons.join('; '), reasons: plan.reasons, state: plan.state, phase: plan.phase },
+        value: repairAnswer(plan, evidence, { dryRun: false, outcome: 'refused', verified: false, live: false }),
+      }, 409);
     }
     const done = repair.executeRepair({
       action, root: market.MARKET_ROOT, slug, txid: plan.txid, plan, bundleDir,
@@ -1626,6 +1630,8 @@ async function marketRepairResponse(request, ctx) {
         pendingRestart: done.pendingRestart === true,
         verified: done.verified === true,
         live: done.live === true,
+        quarantineLeft: done.quarantineLeft === true,
+        restartEvidence: done.restartEvidence,
       }),
     });
   } finally {
@@ -1645,7 +1651,18 @@ function repairInputs(ctx, manager, slug, selfTxid = '') {
     shared: sharedReferenceSummary(ctx, slug),
     dangling: market.danglingBundleLinks().filter((item) => item.slug === slug),
   });
-  return { live, diagnosis, row: live.manifestOk === true ? effectiveRowFor(ctx, live.rowId) : { present: false } };
+  // Which row this transaction is about: the published manifest says it when it is there, and the
+  // journal's own record says it when the published directory has been moved aside — a recovery
+  // often runs precisely when there is no published manifest left to ask.
+  const journal = tx.readJournal(market.MARKET_ROOT, slug);
+  const recorded = journal.ok === true && journal.record !== null && typeof journal.record === 'object' ? journal.record.expected : null;
+  const recordedRowId = recorded !== null && typeof recorded === 'object' ? String(recorded.rowId || '') : '';
+  const rowId = live.manifestOk === true && live.rowId !== '' ? live.rowId : recordedRowId;
+  return {
+    live,
+    diagnosis,
+    row: rowId === '' ? { present: false, serverName: '', command: '', envKeys: [], values: null } : effectiveRowFor(ctx, rowId),
+  };
 }
 
 /**
@@ -1663,7 +1680,7 @@ function repairInputs(ctx, manager, slug, selfTxid = '') {
 function effectiveRowFor(ctx, rowId) {
   const rows = profileMcpRows(ctx);
   if (!Array.isArray(rows) || rowId === '' || !rows.some((candidate) => candidate.id === rowId)) {
-    return { present: false, serverName: '', command: '', envKeys: [] };
+    return { present: false, serverName: '', command: '', envKeys: [], values: null };
   }
   const editor = serviceOf(ctx, 'configEditor');
   try {
@@ -1678,12 +1695,15 @@ function effectiveRowFor(ctx, rowId) {
         serverName: typeof effective.serverName === 'string' ? effective.serverName : '',
         command: typeof effective.command === 'string' ? effective.command : '',
         envKeys: values !== null && typeof values === 'object' && !Array.isArray(values) ? Object.keys(values) : [],
+        // The values themselves stay inside this process: they are compared against a digest the
+        // manifest recorded, never written into a journal or repeated in an answer.
+        values: values !== null && typeof values === 'object' && !Array.isArray(values) ? { ...values } : null,
       };
     }
   } catch {
-    return { present: false, serverName: '', command: '', envKeys: [] };
+    return { present: false, serverName: '', command: '', envKeys: [], values: null };
   }
-  return { present: false, serverName: '', command: '', envKeys: [] };
+  return { present: false, serverName: '', command: '', envKeys: [], values: null };
 }
 
 /** The plan, the diagnosis behind it, and what the answer says was or would be changed. */
@@ -1702,6 +1722,8 @@ function repairAnswer(plan, evidence, extra) {
     evidence: plan.evidence,
     // A dry run has an outcome it *would* have; saying "discarded" before anything was discarded
     // would be the answer claiming an effect it did not have.
+    quarantineLeft: extra.quarantineLeft === true,
+    restartEvidence: plan.restartEvidence === undefined ? [] : plan.restartEvidence,
     outcome: extra.dryRun === true
       ? (plan.outcome === 'refused' ? 'refused' : plan.outcome === 'already-completed' ? 'already-completed' : 'planned')
       : (extra.outcome === undefined ? plan.outcome : extra.outcome),
@@ -1867,10 +1889,15 @@ function officialStateFor(ctx, manager, slug, manifest) {
   }
   const pkg = market.BUNDLE_PREFIX + slug;
   const rowId = manifest === null ? '' : String(manifest.rowId || '');
+  const bundle = bundles.find((item) => item !== null && typeof item === 'object' && item.name === pkg) || null;
+  // rowLive is what the running process has; rowPersisted is what the profile wrote down. A
+  // recovery needs the second one to tell "not live yet" apart from "never installed".
+  const persistedRows = bundle !== null && Array.isArray(bundle.rows) ? bundle.rows : [];
   return {
     readable: true,
-    installed: bundles.some((item) => item !== null && typeof item === 'object' && item.name === pkg && item.installed === true),
+    installed: bundle !== null && bundle.installed === true,
     rowLive: rowId === '' ? null : rows.some((row) => row.id === rowId),
+    rowPersisted: rowId === '' ? null : persistedRows.some((row) => row !== null && typeof row === 'object' && row.rowId === rowId),
   };
 }
 

@@ -129,6 +129,14 @@ function seedProfile(name, { declares = false } = {}) {
 }
 
 /** A distinct patch per tag, so a restore can be checked by content rather than by existence. */
+const configDigestOf = (values) => {
+  const hash = createHash('sha256');
+  for (const key of Object.keys(values).sort()) {
+    hash.update(key); hash.update('\u0000'); hash.update(String(values[key])); hash.update('\u0000');
+  }
+  return hash.digest('hex');
+};
+
 const patchFor = (tag) => '# ' + tag + '\n- insert:\n    - id: ' + rowId + '\n      name: \'@deepseek-ai/dsh-mcp-client\'\n      config:\n        serverName: notes\n';
 
 /**
@@ -143,7 +151,8 @@ function writeBundle(dir, options = {}) {
   const meta = {
     registryName: ENTRY, registryVersion: '1.0.0', installedAt: '2026-01-01T00:00:00Z', source: 'registry',
     slug, pkg, rowId, serverName: 'notes', kind: 'stdio', transport: 'stdio', command: 'node',
-    args: [join(dir, 'server.js')], argumentValues: {}, configKeys: ['API_TOKEN'],
+    args: [join(dir, 'server.js')], argumentValues: {}, configKeys: ['API_TOKEN'], configDigest: configDigestOf({ API_TOKEN: 'configured' }),
+    contentDigest: tx.digestOf({ 'package.json': manifest, 'cordis.patch.yml': patch }),
     txid, renderDigest: tx.digestOf({ 'package.json': manifest, 'cordis.patch.yml': patch }),
   };
   writeFileSync(join(dir, 'package.json'), manifest, 'utf8');
@@ -707,14 +716,14 @@ test('[contract] a file another process holds open never leaves a half-removed r
   assert.equal(locked || process.platform !== 'win32', true, 'the handle really was held while the run happened');
 });
 
-test('[contract] a removal that fails keeps the published directory, the backup and the journal', async () => {
+test('[contract] a quarantine that fails keeps the published directory, the backup and the journal', async () => {
   seedCache();
   seedProfile('desktop', { declares: true });
   const published = writeBundle(bundleDir(), { txid: 'tx-mine', tag: 'v2' });
   writeDirectoryWithBundle(backupDir('tx-mine'), { txid: 'tx-prev', tag: 'v1' });
   writeJournal(journalRecord('tx-mine', 'PUBLISHED'));
   const { routes } = makeCtx({ installed: true });
-  process.env.MCP_MARKET_FAULT = 'repair-remove';
+  process.env.MCP_MARKET_FAULT = 'repair-quarantine';
 
   const failed = await repair(routes, { slug, action: 'rollback', txid: 'tx-mine' });
   delete process.env.MCP_MARKET_FAULT;

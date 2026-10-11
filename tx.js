@@ -50,6 +50,9 @@ export function txPaths(root, slug) {
     journal: join(slugRoot, 'journal.json'),
     staging: join(slugRoot, 'staging'),
     backup: join(slugRoot, 'backup'),
+    // A published version is moved here, never deleted in place: a recursive delete that partly
+    // fails leaves a directory that is neither the old version nor the new one.
+    quarantine: join(slugRoot, 'quarantine'),
   };
 }
 
@@ -139,6 +142,7 @@ export function residue(root, slug) {
   const journal = readJournal(root, slug);
   const staging = listing(paths.staging);
   const backups = listing(paths.backup);
+  const quarantined = listing(paths.quarantine);
   const reasons = [];
   if (journal.ok !== true) reasons.push(journal.reason);
   else if (journal.record !== null) {
@@ -146,12 +150,14 @@ export function residue(root, slug) {
   }
   if (staging.length > 0) reasons.push('staged directories: ' + staging.join(', '));
   if (backups.length > 0) reasons.push('backup directories: ' + backups.join(', '));
+  if (quarantined.length > 0) reasons.push('quarantined directories: ' + quarantined.join(', '));
   return {
     present: reasons.length > 0,
     journal: journal.ok === true ? journal.record : null,
     journalUnreadable: journal.ok !== true,
     staging,
     backups,
+    quarantined,
     reason: reasons.join('; '),
   };
 }
@@ -343,10 +349,23 @@ export function verifyBundleContent(dir) {
   }
   const txid = typeof manifest.txid === 'string' ? manifest.txid : '';
   const recorded = typeof manifest.renderDigest === 'string' ? manifest.renderDigest : '';
+  const whole = typeof manifest.contentDigest === 'string' ? manifest.contentDigest : '';
+  const configDigest = typeof manifest.configDigest === 'string' ? manifest.configDigest : '';
+  if (whole !== '') {
+    const scanned = digestDirectory(dir);
+    if (scanned.ok !== true) {
+      return { ok: false, readable: true, txid, configDigest, coverage: 'unverifiable', verifiable: false, matches: false, reason: scanned.reason };
+    }
+    return {
+      ok: true, readable: true, txid, configDigest, recorded: whole, actual: scanned.digest, coverage: 'whole-bundle',
+      verifiable: true, matches: scanned.digest === whole,
+      reason: scanned.digest === whole ? '' : 'the bundle contains files that are not the ones this transaction wrote',
+    };
+  }
   if (recorded === '') {
     // Written before the digest existed: its content cannot be checked, which is a different answer
     // from "it is fine" and must not be read as one.
-    return { ok: true, readable: true, txid, recorded: '', verifiable: false, matches: false, reason: 'the manifest records no digest, so this content cannot be verified' };
+    return { ok: true, readable: true, txid, configDigest, recorded: '', coverage: 'none', verifiable: false, matches: false, reason: 'the manifest records no digest, so this content cannot be verified' };
   }
   let manifestJson;
   let patch;
@@ -354,10 +373,102 @@ export function verifyBundleContent(dir) {
     manifestJson = readFileSync(join(dir, 'package.json'), 'utf8');
     patch = readFileSync(join(dir, 'cordis.patch.yml'), 'utf8');
   } catch (error) {
-    return { ok: false, readable: true, txid, recorded, reason: 'the rendered files could not be read (' + String((error && error.code) || error) + ')' };
+    return { ok: false, readable: true, txid, configDigest, recorded, reason: 'the rendered files could not be read (' + String((error && error.code) || error) + ')' };
   }
   const actual = digestOf({ 'package.json': manifestJson, 'cordis.patch.yml': patch });
-  return { ok: true, readable: true, txid, recorded, actual, verifiable: true, matches: actual === recorded };
+  // Only the two rendered files are covered by an older digest. Anything else in the directory —
+  // an mcpb payload above all — is not, and the caller is told so rather than reassured.
+  const extra = readdirSync(dir).filter((name) => name !== 'package.json' && name !== 'cordis.patch.yml' && name !== 'market.meta.json');
+  return {
+    ok: true, readable: true, txid, configDigest, recorded, actual, coverage: 'rendered-only', verifiable: true,
+    matches: actual === recorded, unchecked: extra,
+    reason: actual === recorded ? '' : 'the rendered files are not the ones this transaction wrote',
+  };
+}
+
+/**
+ * A digest of the configured values, so they can be compared without being stored.
+ *
+ * accept has to answer "is the value I rendered the value that is running", and storing the values
+ * to answer it would put secrets in a file that a diagnostic then reports on. A digest answers the
+ * same question one way only. It is not a secret-keeping device on its own — the rendered patch
+ * beside it holds the plaintext — but it means no *new* copy of a value is created.
+ */
+export function configDigestOf(values) {
+  const hash = createHash('sha256');
+  for (const key of Object.keys(values === null || values === undefined ? {} : values).sort()) {
+    hash.update(key);
+    hash.update('\u0000');
+    hash.update(String(values[key]));
+    hash.update('\u0000');
+  }
+  return hash.digest('hex');
+}
+
+/** How much of a bundle this reader is willing to look at before calling it too big to verify. */
+const BUNDLE_FILE_LIMIT = 4096;
+const BUNDLE_BYTES_LIMIT = 64 * 1024 * 1024;
+
+/**
+ * A digest of everything in a bundle directory except its own manifest.
+ *
+ * Bounded on purpose: a digest is only useful if it terminates, and a directory somebody has filled
+ * with a million files is not a bundle this plugin wrote. A symbolic link anywhere inside is a
+ * reason to stop rather than follow — a link is not content this transaction rendered.
+ *
+ * @returns \`{ok, digest, files}\` or \`{ok: false, reason}\`.
+ */
+export function digestDirectory(dir, options = {}) {
+  const exclude = options.exclude === undefined ? ['market.meta.json'] : options.exclude;
+  const files = [];
+  let bytes = 0;
+  const walk = (current, prefix) => {
+    let names;
+    try {
+      names = readdirSync(current);
+    } catch (error) {
+      return { ok: false, reason: 'a directory could not be listed (' + String(error.code) + ')' };
+    }
+    for (const name of names.sort()) {
+      const full = join(current, name);
+      const relative = prefix === '' ? name : prefix + '/' + name;
+      let info;
+      try {
+        info = lstatSync(full);
+      } catch (error) {
+        return { ok: false, reason: 'an entry could not be inspected (' + String(error.code) + ')' };
+      }
+      if (info.isSymbolicLink()) return { ok: false, reason: 'a symbolic link (' + relative + ') is not content this plugin wrote' };
+      if (info.isDirectory()) {
+        const nested = walk(full, relative);
+        if (nested !== null) return nested;
+        continue;
+      }
+      if (!info.isFile()) return { ok: false, reason: 'an entry (' + relative + ') is neither a file nor a directory' };
+      if (exclude.includes(relative)) continue;
+      if (files.length >= BUNDLE_FILE_LIMIT) return { ok: false, reason: 'the bundle holds more files than this reader will verify' };
+      bytes += info.size;
+      if (bytes > BUNDLE_BYTES_LIMIT) return { ok: false, reason: 'the bundle is larger than this reader will verify' };
+      let text;
+      try {
+        text = readFileSync(full, 'utf8');
+      } catch (error) {
+        return { ok: false, reason: 'a file could not be read (' + String(error.code) + ')' };
+      }
+      files.push([relative, text]);
+    }
+    return null;
+  };
+  const failure = walk(dir, '');
+  if (failure !== null) return failure;
+  const hash = createHash('sha256');
+  for (const [name, text] of files) {
+    hash.update(name);
+    hash.update('\u0000');
+    hash.update(text);
+    hash.update('\u0000');
+  }
+  return { ok: true, digest: hash.digest('hex'), files: files.map(([name]) => name) };
 }
 
 /** The transaction id a published bundle's own manifest claims, or an empty string. */
@@ -390,6 +501,7 @@ export const DIAGNOSIS_STATES = [
   'lock-blocked',
   'legacy-orphan',
   'shared-live',
+  'quarantine-pending',
 ];
 
 /** Which of the three buckets a state falls into. */
@@ -407,6 +519,7 @@ const RISK_BY_STATE = {
   'lock-blocked': 'stop',
   'legacy-orphan': 'manual',
   'shared-live': 'manual',
+  'quarantine-pending': 'manual',
 };
 
 /** The sentence a person gets next to the state. Never an action taken by this code. */
@@ -424,6 +537,7 @@ const NEXT_STEP_BY_STATE = {
   'lock-blocked': 'an operation holds this slug, or left a lock behind: the holder is named, and nothing may be touched while it is there',
   'legacy-orphan': 'this bundle was written before transactions existed and the profile does not list it as installed',
   'shared-live': 'another profile reads this bundle: changing it in place would change what that profile loads',
+  'quarantine-pending': 'a recovery was interrupted between moving the published version aside and putting the previous one back: the quarantined copy is the only one, so it is read before anything else runs',
 };
 
 /** A path as this API reports one: inside the market root, or plainly marked as not. */
@@ -493,6 +607,7 @@ export function readArtifacts(root, slug) {
   };
   const staging = scan(paths.staging);
   const backup = scan(paths.backup);
+  const quarantine = scan(paths.quarantine);
   return {
     journal: {
       present: journal.ok === true ? journal.record !== null : true,
@@ -503,10 +618,12 @@ export function readArtifacts(root, slug) {
     },
     staging,
     backup,
+    quarantine,
     paths: {
       journal: reportedPath(root, paths.journal),
       staging: reportedPath(root, paths.staging),
       backups: reportedPath(root, paths.backup),
+      quarantine: reportedPath(root, paths.quarantine),
       root: reportedPath(root, paths.slugRoot),
     },
   };
@@ -551,6 +668,8 @@ export function readLiveBundle(bundleDir) {
     rowId: typeof manifest.rowId === 'string' ? manifest.rowId : '',
     serverName: typeof manifest.serverName === 'string' ? manifest.serverName : '',
     renderDigest: typeof manifest.renderDigest === 'string' ? manifest.renderDigest : '',
+    configDigest: typeof manifest.configDigest === 'string' ? manifest.configDigest : '',
+    contentDigest: typeof manifest.contentDigest === 'string' ? manifest.contentDigest : '',
     // Names, never values: the manifest also holds what a person typed into the argument slots, and
     // a diagnostic answer is not the place to read that back out.
     configKeys: Array.isArray(manifest.configKeys) ? manifest.configKeys.filter((key) => typeof key === 'string') : [],
@@ -569,7 +688,7 @@ export function readLiveBundle(bundleDir) {
  * first state that fits is the answer, and every finding is kept alongside it so the parts that
  * fit more than one state are not lost.
  */
-export function diagnoseTransaction({ slug, root: root0, journal, staging, backup, live, official, lock, shared, dangling }) {
+export function diagnoseTransaction({ slug, root: root0, journal, staging, backup, quarantine, live, official, lock, shared, dangling }) {
   const findings = [];
   const add = (code, detail) => findings.push({ code, detail });
   const entries = (scan) => (scan && Array.isArray(scan.entries) ? scan.entries : []);
@@ -580,6 +699,7 @@ export function diagnoseTransaction({ slug, root: root0, journal, staging, backu
   const declaredTxid = record !== null && typeof record.txid === 'string' ? record.txid : '';
   const stagingTxids = dirs(staging);
   const backupTxids = dirs(backup);
+  const quarantineTxids = dirs(quarantine);
 
   if (journal && journal.present === true && journal.readable !== true) add('journal-unreadable', journal.reason || 'the journal could not be read');
   if (journal && journal.unreadable) add('artifacts-unreadable', journal.unreadable);
@@ -589,6 +709,10 @@ export function diagnoseTransaction({ slug, root: root0, journal, staging, backu
   for (const entry of suspicious(backup)) add('suspicious-artifact-name', 'backup entry ' + entry.name + ' is a ' + entry.kind + ', which no transaction of this plugin creates');
   if (stagingTxids.length > 0) add('staged-artifacts', stagingTxids.length + ' staged director' + (stagingTxids.length === 1 ? 'y' : 'ies'));
   if (backupTxids.length > 0) add('backup-artifacts', backupTxids.length + ' backup director' + (backupTxids.length === 1 ? 'y' : 'ies'));
+  if (quarantineTxids.length > 0) {
+    add('quarantined-artifacts', 'a published version was moved aside while a recovery was under way: ' + quarantineTxids.join(', '));
+  }
+  for (const entry of suspicious(quarantine)) add('suspicious-artifact-name', 'quarantine entry ' + entry.name + ' is a ' + entry.kind + ', which no transaction of this plugin creates');
   if (live && live.present === true && live.manifestOk !== true) add('live-manifest-unreadable', live.reason || 'the published manifest could not be read');
   if (live && live.present === true && live.manifestOk === true && live.untagged === true) {
     add('legacy-manifest', 'the published manifest has no transaction id, so ownership cannot be settled by it');
@@ -641,6 +765,7 @@ export function diagnoseTransaction({ slug, root: root0, journal, staging, backu
           : live.untagged === true ? 'manifest-missing-txid' : 'manifest-txid',
     stagingTxids,
     backupTxids,
+    quarantineTxids,
     note: 'directory names are claims made by whoever created them; only a manifest that carries a transaction id is evidence',
   };
 
@@ -659,6 +784,9 @@ export function diagnoseTransaction({ slug, root: root0, journal, staging, backu
   else if (record !== null && phase === 'BACKED_UP' && (live === undefined || live.present !== true)) state = 'backup-without-live';
   else if (record !== null && phase === 'PUBLISHED') state = 'published-not-verified';
   else if (record !== null && phase === 'STAGED') state = 'staged-only';
+  // A published version sitting in quarantine means a recovery stopped between its two renames:
+  // the bundle directory is missing on purpose, and what is in quarantine is not garbage.
+  else if (quarantineTxids.length > 0) state = 'quarantine-pending';
   else if (record === null && (stagingTxids.length > 0 || backupTxids.length > 0)) state = 'orphan-artifacts';
   else if (record !== null && (stagingTxids.some((name) => name !== declaredTxid) || backupTxids.some((name) => name !== declaredTxid))) state = 'orphan-artifacts';
   else if (live && live.present === true && live.manifestOk === true && live.untagged === true && official && official.installed !== true) state = 'legacy-orphan';
@@ -680,7 +808,8 @@ export function diagnoseTransaction({ slug, root: root0, journal, staging, backu
       journal: journal && journal.present === true ? journalPathOf(root0, slug) : '',
       staging: stagingTxids,
       backup: backupTxids,
-      suspicious: suspicious(staging).concat(suspicious(backup)).map((entry) => entry.path),
+      quarantine: quarantineTxids,
+      suspicious: suspicious(staging).concat(suspicious(backup)).concat(suspicious(quarantine)).map((entry) => entry.path),
     },
     official: official === undefined ? null : official,
     lock: lock === undefined ? null : { state: lock.state, alive: lock.alive === true, txid: lock.txid || '', op: lock.op || '' },

@@ -18,7 +18,7 @@
  * The plan is a pure function of what was read; the executor is the only part that writes, and it
  * announces its intent in the journal before each dangerous step.
  */
-import { existsSync, lstatSync, readFileSync, renameSync, rmSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import { isAbsolute, join, relative as relativeTo, sep } from 'node:path';
 import * as tx from './tx.js';
 
@@ -34,6 +34,8 @@ function messageOf(error) {
 
 /** One directory's evidence, read and never followed. */
 function artifact(dir) {
+  // \`verifyBundleContent\` is the one predicate here: a directory is usable only when its content
+  // matches what the transaction recorded, and only when that record covers everything inside it.
   let info;
   try {
     info = lstatSync(dir);
@@ -47,7 +49,11 @@ function artifact(dir) {
   if (content.ok !== true) return { present: true, usable: false, reason: content.reason };
   if (content.verifiable !== true) return { present: true, usable: false, reason: content.reason };
   if (content.matches !== true) return { present: true, usable: false, reason: 'its content does not match the digest its manifest records' };
-  return { present: true, usable: true, txid: content.txid, digest: content.recorded };
+  const extra = Array.isArray(content.unchecked) ? content.unchecked : [];
+  if (content.coverage !== 'whole-bundle' && extra.length > 0) {
+    return { present: true, usable: false, reason: 'the bundle holds files this manifest does not cover (' + extra.join(', ') + ')' };
+  }
+  return { present: true, usable: true, txid: content.txid, digest: content.recorded, configDigest: content.configDigest, coverage: content.coverage };
 }
 
 function sorted(values) {
@@ -80,6 +86,17 @@ function compareRow(row, live) {
   if (Array.isArray(row.envKeys) && Array.isArray(live.configKeys)) {
     checked.push('configured keys');
     if (!sameSet(row.envKeys, live.configKeys)) mismatched.push('the configured keys are ' + JSON.stringify(sorted(row.envKeys)) + ' and the manifest records ' + JSON.stringify(sorted(live.configKeys)));
+  }
+  // The values themselves, compared without being written down anywhere: the manifest records a
+  // digest of what it rendered, and the running row is digested here, in memory.
+  if (typeof live.configDigest === 'string' && live.configDigest !== '') {
+    if (row.values === null || typeof row.values !== 'object') {
+      return { verdict: 'incomplete', detail: 'the running row carries no configured values to compare with' };
+    }
+    checked.push('configured values');
+    if (tx.configDigestOf(row.values) !== live.configDigest) mismatched.push('the configured values are not the ones this version was installed with');
+  } else {
+    return { verdict: 'incomplete', detail: 'the manifest records no digest of its configured values, so they cannot be compared' };
   }
   if (checked.length === 0) return { verdict: 'inconclusive', detail: 'nothing about the running row can be compared with the manifest' };
   if (mismatched.length > 0) return { verdict: 'mismatched', detail: mismatched.join('; '), checked };
@@ -181,6 +198,25 @@ export function planRepair({ action, slug, txid, diagnosis, live, row, root, bun
       }
       evidence.push('published directory names ' + effective, 'its content still matches the recorded digest');
     }
+    // Whoever is running now has to be one of the two versions this transaction knows about: the
+    // one it published, or the one it backed up. A third configuration means something changed
+    // outside this transaction, and a rollback would overwrite it.
+    const known = [live && live.configDigest, backup.configDigest].filter((value) => typeof value === 'string' && value !== '');
+    if (known.length === 0) {
+      reasons.push('neither version records a digest of its configured values, so the running configuration cannot be shown to be one of them');
+      return null;
+    }
+    if (row === null || row === undefined || row.present !== true) {
+      if (backup.present) { reasons.push('the running configuration has no row for this bundle, so the effect of a rollback cannot be predicted'); return null; }
+    } else if (row.values === null || typeof row.values !== 'object') {
+      reasons.push('the running configuration\'s values cannot be read, so a rollback cannot be shown to preserve them');
+      return null;
+    } else if (!known.includes(tx.configDigestOf(row.values))) {
+      reasons.push('the running configuration matches neither the published version nor the backup, so it changed outside this transaction');
+      return null;
+    } else {
+      evidence.push('the running configuration is one of the two versions this transaction knows');
+    }
     if (backup.present) {
       if (backup.usable !== true) { reasons.push('the backup cannot be verified: ' + backup.reason); return null; }
       evidence.push('backup content matches the digest its own manifest records');
@@ -196,7 +232,10 @@ export function planRepair({ action, slug, txid, diagnosis, live, row, root, bun
         return null;
       }
     }
-    if (publishedIsOurs) changes.unshift({ path: relative(bundleDir), kind: 'remove-directory' });
+    if (publishedIsOurs) {
+      changes.unshift({ path: relative(join(paths.quarantine, effective)), kind: 'quarantine-published' });
+      changes.splice(1, 0, { path: relative(bundleDir), kind: 'move-to-quarantine' });
+    }
     changes.push({ path: relative(paths.journal), kind: 'delete-journal' });
     return { allowed: true, already: false, changes, outcome: 'rolled-back' };
   };
@@ -217,17 +256,36 @@ export function planRepair({ action, slug, txid, diagnosis, live, row, root, bun
     if (official.installed !== true) { reasons.push('the profile does not list this bundle as installed, so the persisted state is not correct'); return null; }
     evidence.push('the profile lists the bundle as an installed dependency');
     const comparison = compareRow(row, published);
+    if (comparison.verdict === 'incomplete') {
+      // The persisted state checks out, but the values cannot be shown to be the ones that were
+      // rendered — and a verification that cannot be completed is not a verification.
+      reasons.push('the running configuration cannot be compared value by value with this version: ' + comparison.detail);
+      return { incomplete: true };
+    }
     if (comparison.verdict === 'mismatched') { reasons.push('the running configuration is not this version: ' + comparison.detail); return null; }
     if (comparison.verdict === 'inconclusive') { reasons.push('the running configuration cannot be compared with the manifest: ' + comparison.detail); return null; }
-    const pendingRestart = comparison.verdict === 'absent';
-    if (comparison.verdict === 'matches') evidence.push('the running row matches the manifest on ' + comparison.checked.join(', '));
+    if (comparison.verdict === 'absent') {
+      // Nothing running is only a pending restart when the profile itself says the bundle is there.
+      // Otherwise it is a persisted state that never happened, which is not a success at all.
+      if (official.rowPersisted !== true) {
+        reasons.push('the running configuration has no row for this bundle, and the profile does not list that row as persisted either, so the install never took effect');
+        return null;
+      }
+      return {
+        allowed: true, already: false, outcome: 'accepted', pendingRestart: true, verified: true, live: false,
+        restartEvidence: ['the profile lists this bundle as an installed dependency', 'the profile persists row ' + String(published.rowId) + ' for it', 'the published content matches what this transaction rendered', 'the running configuration does not carry that row yet'],
+        changes: [{ path: relative(paths.journal), kind: 'delete-journal' }],
+      };
+    }
+    evidence.push('the running row matches the manifest on ' + comparison.checked.join(', '));
     return {
-      allowed: true, already: false, outcome: 'accepted', pendingRestart, verified: true, live: comparison.verdict === 'matches',
+      allowed: true, already: false, outcome: 'accepted', pendingRestart: false, verified: true, live: true,
       changes: [{ path: relative(paths.journal), kind: 'delete-journal' }],
     };
   };
 
   let chosen = null;
+  let incomplete = false;
   if (action === 'discard-staging') chosen = planDiscard();
   else if (action === 'rollback') {
     if (declared === '' && !backup.present && !publishedIsOurs) {
@@ -238,16 +296,43 @@ export function planRepair({ action, slug, txid, diagnosis, live, row, root, bun
     if (declared === '' && !existsSync(paths.journal)) {
       evidence.push('no journal for this transaction');
       chosen = { allowed: true, already: true, changes: [], outcome: 'already-completed' };
-    } else chosen = planAccept();
+    } else {
+      chosen = planAccept();
+      if (chosen !== null && chosen.incomplete === true) incomplete = true;
+    }
   } else if (action === 'retry-recovery') {
-    if (state !== 'needs-attention') { reasons.push('retry-recovery is only for a transaction already marked as needing attention; this state is ' + (state === '' ? 'unknown' : state)); }
-    else chosen = planRollback();
-    if (chosen === null) { reasons.length = 0; chosen = planDiscard(); if (chosen !== null) reasons.length = 0; }
+    if (state !== 'needs-attention' && state !== 'quarantine-pending') { reasons.push('retry-recovery is only for a transaction a recovery already interrupted; this state is ' + (state === '' ? 'unknown' : state)); }
+    else {
+      chosen = planRollback();
+      if (chosen === null || chosen.incomplete === true) {
+        // The reason a retry could not finish belongs to the recovery it was trying to finish, so
+        // the rollback's reasons are kept and only replaced when a discard is the real answer.
+        const refusedRollback = reasons.slice();
+        reasons.length = 0;
+        const discarded = chosen === null ? planDiscard() : null;
+        if (discarded === null) {
+          reasons.length = 0;
+          reasons.push(...refusedRollback);
+          chosen = null;
+        } else {
+          reasons.length = 0;
+          chosen = discarded;
+        }
+      }
+    }
   } else {
     reasons.push('unknown action');
   }
 
-  if (chosen === null) return refuse();
+  if (chosen === null || chosen.incomplete === true) {
+    if (incomplete) {
+      return {
+        action, slug, txid: effective, allowed: false, code: 'verification-incomplete', reasons,
+        changes: [], evidence, outcome: 'refused', state, phase, pendingRestart: false, verified: false, live: false,
+      };
+    }
+    return refuse();
+  }
   if (chosen.already === true) {
     return { action, slug, txid: effective, allowed: true, code: '', reasons: [], changes: [], evidence, outcome: 'already-completed', state, phase, pendingRestart: false, verified: false, live: false };
   }
@@ -255,6 +340,7 @@ export function planRepair({ action, slug, txid, diagnosis, live, row, root, bun
     action, slug, txid: effective, allowed: true, code: '', reasons: [], changes: chosen.changes, evidence,
     outcome: chosen.outcome, state, phase,
     pendingRestart: chosen.pendingRestart === true, verified: chosen.verified === true, live: chosen.live === true,
+    restartEvidence: chosen.restartEvidence === undefined ? [] : chosen.restartEvidence,
   };
 }
 
@@ -299,29 +385,32 @@ export function executeRepair({ action, root, slug, txid, plan, bundleDir, expec
     // Nothing dangerous happens here: the transaction already published what it published, and the
     // only effect is that its journal stops describing it as unfinished.
     tx.clearJournal(root, slug);
-    return { ok: true, outcome: 'accepted', changes: plan.changes, pendingRestart: plan.pendingRestart === true, verified: plan.verified === true, live: plan.live === true };
+    return { ok: true, outcome: 'accepted', changes: plan.changes, pendingRestart: plan.pendingRestart === true, verified: plan.verified === true, live: plan.live === true, restartEvidence: plan.restartEvidence === undefined ? [] : plan.restartEvidence };
   }
 
-  // rollback and retry-recovery both end with the previous version in place.
-  const written = announce('ROLLED_BACK', 'restore-backup');
-  if (written.ok !== true) return { ok: false, code: 'repair-refused', message: 'the intent could not be recorded, so nothing was changed: ' + written.reason, changes: [], outcome: 'refused' };
-  const removingPublished = plan.changes.some((change) => change.kind === 'remove-directory');
-  if (removingPublished && existsSync(bundleDir)) {
+  // rollback and retry-recovery both end with the previous version in place, and neither of them
+  // deletes the published bundle in place: it is moved aside first, so a recovery that stops
+  // halfway leaves both versions on disk rather than one half of one.
+  const quarantineDir = join(paths.quarantine, txid);
+  const movingPublished = plan.changes.some((change) => change.kind === 'move-to-quarantine');
+  if (movingPublished && existsSync(bundleDir)) {
     const verified = tx.verifyBundleContent(bundleDir);
     if (verified.ok !== true || verified.matches !== true || verified.txid !== txid) {
       return attention('the published directory changed since the check', 'it is left exactly as it is');
     }
+    const written = announce('ROLLED_BACK', 'quarantine-published');
+    if (written.ok !== true) return { ok: false, code: 'repair-refused', message: 'the intent could not be recorded, so nothing was changed: ' + written.reason, changes: [], outcome: 'refused' };
     try {
-      tx.faultForTest('repair-remove');
-      rmSync(bundleDir, { recursive: true, force: true });
-      // An rm that does not throw is not proof the directory is gone: on Windows a file another
-      // process holds open is skipped, and the call still returns. The effect is checked, and a
-      // directory that survived is not renamed over.
-      if (existsSync(bundleDir)) return attention('the published directory survived its removal', 'a file inside it is held by another process, so nothing was renamed over it');
+      if (existsSync(quarantineDir)) return attention('a quarantined copy of this transaction already exists', 'it is not overwritten');
+      mkdirSync(paths.quarantine, { recursive: true });
+      tx.faultForTest('repair-quarantine');
+      renameSync(bundleDir, quarantineDir);
     } catch (error) {
-      return attention('the published directory could not be removed', messageOf(error));
+      return attention('the published directory could not be moved aside', messageOf(error));
     }
   }
+  const written = announce('ROLLED_BACK', 'restore-backup');
+  if (written.ok !== true) return { ok: false, code: 'repair-refused', message: 'the intent could not be recorded, so nothing was changed: ' + written.reason, changes: [], outcome: 'refused' };
   if (existsSync(backupDir)) {
     let info;
     try {
@@ -338,7 +427,25 @@ export function executeRepair({ action, root, slug, txid, plan, bundleDir, expec
     } catch (error) {
       return attention('the previous version could not be put back', messageOf(error));
     }
+    // The restore is only done when the directory that is now published verifies as the version that
+    // was just moved into place — otherwise a rename that "worked" would be the whole evidence.
+    const restored = tx.verifyBundleContent(bundleDir);
+    if (restored.ok !== true || restored.matches !== true) {
+      return attention('the restored directory does not verify', 'the backup was moved into place but does not match its own digest');
+    }
+  }
+  let quarantineLeft = false;
+  if (existsSync(quarantineDir)) {
+    // Cleaning up is the last step and the least important one: it may fail without the recovered
+    // bundle being any worse off, and it is never reported as a failure of the rollback.
+    try {
+      tx.faultForTest('repair-quarantine-clean');
+      rmSync(quarantineDir, { recursive: true, force: true });
+      quarantineLeft = existsSync(quarantineDir);
+    } catch {
+      quarantineLeft = true;
+    }
   }
   tx.clearJournal(root, slug);
-  return { ok: true, outcome: 'rolled-back', changes: plan.changes };
+  return { ok: true, outcome: 'rolled-back', changes: plan.changes, quarantineLeft };
 }
