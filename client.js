@@ -859,9 +859,9 @@ window.__ModuleLoader__.load({
             type: 'button',
             className: 'mcpm-btn',
             'data-state': 'installed',
-            disabled: busy === item.slug || item.inUse === false,
+            disabled: busy === item.slug,
             onClick: () => onUninstall(item),
-          }, busy === item.slug ? '卸载中…' : (item.inUse === false ? '已解除' : '卸载')),
+          }, busy === item.slug ? '卸载中…' : (item.inUse === false ? '删除本地文件' : '卸载')),
         ),
         item.error ? h('p', { className: 'mcpm-error' }, item.error) : null,
       );
@@ -982,9 +982,14 @@ window.__ModuleLoader__.load({
           // Say what the cleanup did: "uninstalled" and "uninstalled with a dead link still
           // sitting in the profile" used to look identical from here.
           const pruned = (done && done.pruned) || [];
-          setHint('已卸载「' + (item.registryTitle || item.registryName) + '」'
+          // Say what happened to the files, not just that the profile let go: a removal that kept
+          // them has a reason, and that reason is the only useful part of the answer.
+          const why = done && done.retireReason === 'retire-shared' ? '其他 Profile 仍在使用'
+            : done && done.retireReason === 'retire-content-changed' ? '内容在安装后被改动过'
+            : done && done.retireReason ? String(done.retireDetail || done.retireReason) : '';
+          setHint((done && done.retired === true ? '已卸载并删除「' : '已卸载「') + (item.registryTitle || item.registryName) + '」'
             + (pruned.length > 0 ? '，并清理了 ' + pruned.length + ' 个残留链接' : '')
-          + (done && done.alreadyDetached ? '（此前已解除，本地文件保留）' : ''));
+          + (done && done.retired !== true && why !== '' ? '（本地文件保留：' + why + '）' : ''));
         } catch (e) {
           setError(String((e && e.message) || e));
         } finally {
