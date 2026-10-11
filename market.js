@@ -2002,6 +2002,38 @@ export function writeBundle({ slug, rowId = '', server, serverName, plan, args, 
 }
 
 /**
+ * Write down the answer the installer gave, with the operation that received it.
+ *
+ * The answer is evidence, and evidence has to name what it is about: a restart requirement recorded
+ * without a transaction, a profile and a version would be indistinguishable from one left behind by
+ * an earlier installation — and would authorise a claim about a configuration nobody observed. The
+ * value is one of a fixed set of words, and nothing configured is written here.
+ */
+export function recordPublishedApplication(dir, evidence) {
+  const path = join(dir, 'market.meta.json');
+  let meta;
+  try {
+    meta = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (error) {
+    return { ok: false, reason: 'the manifest could not be read (' + String((error && error.code) || error) + ')' };
+  }
+  if (meta === null || typeof meta !== 'object') return { ok: false, reason: 'the manifest is not an object' };
+  meta.published = {
+    application: typeof evidence.application === 'string' ? evidence.application : '',
+    txid: typeof evidence.txid === 'string' ? evidence.txid : '',
+    profile: typeof evidence.profile === 'string' ? evidence.profile : '',
+    rowId: typeof evidence.rowId === 'string' ? evidence.rowId : '',
+    at: typeof evidence.at === 'string' ? evidence.at : '',
+  };
+  try {
+    writeFileSync(path, JSON.stringify(meta, null, 2), 'utf8');
+  } catch (error) {
+    return { ok: false, reason: 'the manifest could not be written (' + String((error && error.code) || error) + ')' };
+  }
+  return { ok: true, published: meta.published };
+}
+
+/**
  * Why a staging directory must not be written to, or '' when it may.
  *
  * Staging lives under the market root like everything else, so a link placed where the directory

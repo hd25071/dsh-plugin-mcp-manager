@@ -783,6 +783,16 @@ export function readLiveBundle(bundleDir) {
     renderDigest: typeof manifest.renderDigest === 'string' ? manifest.renderDigest : '',
     configDigest: typeof manifest.configDigest === 'string' ? manifest.configDigest : '',
     contentDigest: typeof manifest.contentDigest === 'string' ? manifest.contentDigest : '',
+    // The installer's answer as the operation recorded it, or null when there is none to read.
+    published: manifest.published !== null && typeof manifest.published === 'object' && !Array.isArray(manifest.published)
+      ? {
+        application: typeof manifest.published.application === 'string' ? manifest.published.application : '',
+        txid: typeof manifest.published.txid === 'string' ? manifest.published.txid : '',
+        profile: typeof manifest.published.profile === 'string' ? manifest.published.profile : '',
+        rowId: typeof manifest.published.rowId === 'string' ? manifest.published.rowId : '',
+        at: typeof manifest.published.at === 'string' ? manifest.published.at : '',
+      }
+      : null,
     ...configEvidenceOf(manifest),
     // Names, never values: the manifest also holds what a person typed into the argument slots, and
     // a diagnostic answer is not the place to read that back out.

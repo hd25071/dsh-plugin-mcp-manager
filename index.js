@@ -1343,6 +1343,16 @@ async function marketInstallResponse(request, ctx) {
       ctx, manager, slug, txid, written, identity, result, announce, paths, backupPath, profileBefore,
     });
   }
+  // The installer's own answer, written down with the operation that received it, before anything is
+  // verified: a later recovery reads what was answered instead of inferring a restart from a row
+  // that is not there. Only the fixed set of words is stored — never a configured value.
+  market.recordPublishedApplication(written.dir, {
+    application: typeof result.application === 'string' ? result.application : '',
+    txid,
+    profile: profileNameOf(ctx),
+    rowId: identity.rowId,
+    at: new Date().toISOString(),
+  });
   const runtime = runtimeVerdict(ctx, identity.rowId, previous);
   announce('VERIFYING', 'verify');
   const verification = postInstallVerification(ctx, manager, written.pkg, identity.rowId, serverName, runtime);
@@ -1575,7 +1585,8 @@ async function marketRepairResponse(request, ctx) {
   const bundleDir = market.bundleDir(slug);
   const inputs = (selfTxid) => repairInputs(ctx, manager, slug, selfTxid === undefined ? '' : selfTxid);
   const planned = (evidence) => repair.planRepair({
-    action, slug, txid, diagnosis: evidence.diagnosis, live: evidence.live, row: evidence.row, root: market.MARKET_ROOT, bundleDir,
+    action, slug, txid, diagnosis: evidence.diagnosis, live: evidence.live, row: evidence.row,
+    profile: evidence.profile, root: market.MARKET_ROOT, bundleDir,
   });
 
   if (body.dryRun === true) {
@@ -1640,6 +1651,12 @@ async function marketRepairResponse(request, ctx) {
 }
 
 /** Everything the repair decision needs, read once, without writing anything. */
+/** The profile this request is being served for, as the identity it is registered under. */
+function profileNameOf(ctx) {
+  const profile = serviceOf(ctx, 'profileContext');
+  return profile !== null && profile !== undefined && typeof profile.name === 'string' ? profile.name : '';
+}
+
 function repairInputs(ctx, manager, slug, selfTxid = '') {
   const live = tx.readLiveBundle(market.bundleDir(slug));
   const diagnosis = tx.diagnoseSlug({
@@ -1661,6 +1678,7 @@ function repairInputs(ctx, manager, slug, selfTxid = '') {
   return {
     live,
     diagnosis,
+    profile: profileNameOf(ctx),
     row: rowId === '' ? { present: false, serverName: '', transport: '', command: '', args: [], env: null, headers: null, envKeys: [], values: null } : effectiveRowFor(ctx, rowId),
   };
 }

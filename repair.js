@@ -121,7 +121,7 @@ function compareRow(row, live) {
  *
  * @returns `{allowed, code, reasons, changes, evidence, outcome, ...}` — a plan, never an effect.
  */
-export function planRepair({ action, slug, txid, diagnosis, live, row, root, bundleDir }) {
+export function planRepair({ action, slug, txid, diagnosis, live, row, profile, root, bundleDir }) {
   const reasons = [];
   const changes = [];
   const evidence = [];
@@ -282,6 +282,14 @@ export function planRepair({ action, slug, txid, diagnosis, live, row, root, bun
     if (official.readable !== true) { reasons.push('the profile state cannot be read, so the persisted result cannot be verified'); return null; }
     if (official.installed !== true) { reasons.push('the profile does not list this bundle as installed, so the persisted state is not correct'); return null; }
     evidence.push('the profile lists the bundle as an installed dependency');
+    // Before any claim about a restart, the configuration the claim would be about has to be
+    // provable: an older manifest cannot buy its way past the version 2 requirement by asking for a
+    // restart instead of a verification.
+    if (live.configEvidence !== 'v2') {
+      reasons.push('the published version records no usable version 2 configuration evidence ('
+        + String(live.configEvidence || 'absent') + '), so an effect cannot be claimed for it');
+      return { incomplete: true };
+    }
     const comparison = compareRow(row, published);
     if (comparison.verdict === 'incomplete') {
       // The persisted state checks out, but the values cannot be shown to be the ones that were
@@ -292,11 +300,33 @@ export function planRepair({ action, slug, txid, diagnosis, live, row, root, bun
     if (comparison.verdict === 'mismatched') { reasons.push('the running configuration is not this version: ' + comparison.detail); return null; }
     if (comparison.verdict === 'inconclusive') { reasons.push('the running configuration cannot be compared with the manifest: ' + comparison.detail); return null; }
     if (comparison.verdict === 'absent') {
-      // A restart is not inferred from an absence. Until an operation records the installer's own
-      // restart requirement, a missing row means the running configuration cannot be verified at
-      // all — an incomplete verification, never a success and never a live configuration.
-      reasons.push('the running configuration does not carry this bundle, and this transaction records no restart requirement from the installer, so the effect of the publish cannot be verified');
-      return { incomplete: true };
+      // A restart is a thing an operation records, never a thing an absence implies. The record has
+      // to be this transaction's, this profile's and this version's — an answer left behind by an
+      // earlier installation proves nothing about what is running now.
+      const recorded = live.published === null || live.published === undefined ? null : live.published;
+      const missing = [];
+      if (recorded === null) missing.push('no installer answer was recorded with this version');
+      else {
+        if (recorded.application !== 'restart-required') missing.push('the installer answered "' + String(recorded.application || 'nothing') + '", not restart-required');
+        if (recorded.txid !== effective) missing.push('the recorded answer belongs to another transaction (' + String(recorded.txid || 'none') + ')');
+        if (recorded.profile !== String(profile || '')) missing.push('the recorded answer belongs to another profile (' + String(recorded.profile || 'none') + ')');
+        if (recorded.rowId !== String(published.rowId || '')) missing.push('the recorded answer belongs to another version of this bundle');
+      }
+      if (missing.length > 0) {
+        reasons.push('a pending restart cannot be claimed: ' + missing.join('; '));
+        return { incomplete: true };
+      }
+      return {
+        allowed: true, already: false, outcome: 'accepted', pendingRestart: true, verified: true, live: false,
+        restartEvidence: [
+          'the installer answered restart-required, recorded when it returned',
+          'and the record names this transaction (' + effective + ')',
+          'this profile (' + String(profile) + ') and this version (' + String(published.rowId) + ')',
+          'the published content matches what this transaction rendered',
+          'the running configuration does not carry it yet',
+        ],
+        changes: [{ path: relative(paths.journal), kind: 'delete-journal' }],
+      };
     }
     if (comparison.verdict === 'never') {
       if (official.rowPersisted !== true) {
