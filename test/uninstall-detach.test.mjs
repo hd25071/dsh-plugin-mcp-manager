@@ -293,3 +293,20 @@ test('[contract] a bundle the installation refuses to remove is refused with its
   assert.equal(existsSync(bundleDir()), true, 'nothing was removed');
   assert.deepEqual(profileManifest('desktop').dsh.profile.bundles, [pkg], 'and the profile still declares it');
 });
+
+test('[contract] the listing says whether this profile still uses the bundle', async () => {
+  writeProfile('desktop');
+  writeBundle();
+  writeAnchor({});
+  const routes = makeCtx();
+
+  const before = await call(routes, host.MARKET_INSTALLED_PATH, {});
+  assert.equal(before.body.value.items[0].inUse, true, 'it is in use while the profile declares it');
+
+  const done = await uninstall(routes);
+  assert.equal(done.status, 200, JSON.stringify(done.body));
+
+  const after = await call(routes, host.MARKET_INSTALLED_PATH, {});
+  assert.equal(after.body.value.items.length, 1, 'the bundle is still listed: its files are still there');
+  assert.equal(after.body.value.items[0].inUse, false, 'but this profile no longer uses it');
+});

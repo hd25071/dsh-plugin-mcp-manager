@@ -1914,6 +1914,13 @@ function marketInstalledResponse(ctx) {
   const items = manifests.map((manifest) => {
     const entry = state.servers.find((server) => server.name === manifest.registryName) || null;
     const live = stateOfRow(ctx, manifest, toolNames);
+    // Two different facts share one list: the bundle file exists, and this profile still loads
+    // it. After a detach the first stays true on purpose while the second becomes false, and a
+    // list that shows only one of them keeps telling a person their uninstall did not work.
+    const mine = market.bundleReferences(manifest.slug, currentProfileOf(ctx));
+    const inUse = mine.ok !== true || mine.ownership !== 'known'
+      ? 'unknown'
+      : mine.references.some((item) => item.current === true && item.declared === true);
     // The manifest also carries the values a person typed into the argument slots, and a listing
     // is not a place to read them back out. Everything else is passed through unchanged.
     // A whitelist rather than a spread. A manifest gains fields as the format grows, and a listing
@@ -1932,6 +1939,7 @@ function marketInstalledResponse(ctx) {
       error: live.error,
       toolCount: live.toolCount,
       toolState: live.toolState,
+      inUse,
       latestVersion: entry === null ? null : entry.version,
       // A local entry has no registry counterpart to be newer than, so the comparison is
     // skipped entirely: no update badge, and no 目录版本 vX（不同） line either.

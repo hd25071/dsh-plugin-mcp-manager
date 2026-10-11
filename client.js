@@ -836,6 +836,10 @@ window.__ModuleLoader__.load({
           badgeItems([
             h('span', { key: 'kind', className: 'mcpm-badge mcpm-badge--kind' }, item.kind === 'http' ? 'remote' : item.registryType),
             h('span', { key: 'state', className: 'mcpm-badge mcpm-badge--state' }, STATE_LABEL[item.state] || item.state),
+            // A detached bundle is not an installed one, even though its files are still here.
+            item.inUse === false
+              ? h('span', { key: 'inuse', className: 'mcpm-badge' }, '本 Profile 未使用')
+              : null,
             item.updateAvailable
               ? h('span', { key: 'update', className: 'mcpm-badge mcpm-badge--update' }, '目录版本 v' + item.latestVersion)
               : null,
@@ -855,9 +859,9 @@ window.__ModuleLoader__.load({
             type: 'button',
             className: 'mcpm-btn',
             'data-state': 'installed',
-            disabled: busy === item.slug,
+            disabled: busy === item.slug || item.inUse === false,
             onClick: () => onUninstall(item),
-          }, busy === item.slug ? '卸载中…' : '卸载'),
+          }, busy === item.slug ? '卸载中…' : (item.inUse === false ? '已解除' : '卸载')),
         ),
         item.error ? h('p', { className: 'mcpm-error' }, item.error) : null,
       );
@@ -979,7 +983,8 @@ window.__ModuleLoader__.load({
           // sitting in the profile" used to look identical from here.
           const pruned = (done && done.pruned) || [];
           setHint('已卸载「' + (item.registryTitle || item.registryName) + '」'
-            + (pruned.length > 0 ? '，并清理了 ' + pruned.length + ' 个残留链接' : ''));
+            + (pruned.length > 0 ? '，并清理了 ' + pruned.length + ' 个残留链接' : '')
+          + (done && done.alreadyDetached ? '（此前已解除，本地文件保留）' : ''));
         } catch (e) {
           setError(String((e && e.message) || e));
         } finally {
